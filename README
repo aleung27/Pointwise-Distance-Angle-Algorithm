@@ -1,0 +1,5 @@
+# Differential Privacy Thesis
+
+## Downloading Used Taxicab Dataset
+
+Please download the taxicab dataset from the [Kaggle](https://www.kaggle.com/competitions/nyc-taxi-trip-duration/data?select=train.zip) website which contains the entries used in the analysis. Place the extracted csv file in the root of the folder.
