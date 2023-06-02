@@ -3,3 +3,7 @@
 ## Downloading Used Taxicab Dataset
 
 Please download the taxicab dataset from the [Kaggle](https://www.kaggle.com/competitions/nyc-taxi-trip-duration/data?select=train.zip) website which contains the entries used in the analysis. Place the extracted csv file in the root of the folder.
+
+## Downloading USA AIS Dataset
+
+Please download the AIS dataset from [MaringCadastre](https://marinecadastre.gov/ais/) and place the extracted csv file into the root of the folder. The AIS_2019_01_01 dataset was used as part of this thesis.
