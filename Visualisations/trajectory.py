@@ -1,5 +1,6 @@
 import pandas as pd
 import os
+import numpy as np
 from pathlib import Path
 
 import geopandas as gpd
@@ -63,6 +64,33 @@ def sample_angle(eps: float, theta: float) -> float:
     # Use the inverse CDF to sample from the distribution
     return inverse_cdf(X, eps, theta)
 
+
+def sample_distance(eps: float, r: float) -> float:
+    """
+    Samples a distance according to the pdf given by
+    Pr(r) = C*exp(ε*(r-x)/2r)
+    Here we have:
+    Δu = r, u(r, x) = r - x where x ∈ [0, r]
+    1/C = 2r(e^(ε/2)-1)/ε
+    which gives a pdf with area 1.
+
+    The utility function generates maximum utility when the distance
+    between ship's current private position and the next point in the location
+    data is as minimal as possible
+    """
+
+    def inverse_cdf(X: float, eps: float, r: float) -> float:
+        return r - 2 * r * np.log(np.exp(eps / 2) + (1 - np.exp(eps / 2)) * X) / eps
+
+    # Utilise the inverse transform sampling method to sample from the distribution
+    X = np.random.uniform(0, 1)
+    x = np.linspace(0, 1, 100)
+    y = [inverse_cdf(x, eps, r) for x in x]
+    plt.plot(x, y)
+    plt.show()
+
+    # Use the inverse CDF to sample from the distribution
+    return inverse_cdf(X, eps, r)
 
 if __name__ == "__main__":
     ship_id = input("Enter a id to plot trajectory: ")
