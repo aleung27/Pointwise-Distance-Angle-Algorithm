@@ -5,11 +5,14 @@ from pathlib import Path
 
 import geopandas as gpd
 import matplotlib.pyplot as plt
+from geographiclib.geodesic import Geodesic
 
-DATASET_FOLDER = os.path.join(Path(__file__).parent.parent, "AIS_2019_01_01.csv")
+DATASET_PATH = os.path.join(Path(__file__).parent.parent, "AIS_2019_01_01.csv")
 
 WEB_MERCATOR = "EPSG:3857"  # Standard flat projection for web maps
 WGS_84 = "EPSG:4326"  # Projection for latitude and longitude
+
+EPSILON = 1  # Privacy parameter
 
 
 def sample_angle(eps: float, theta: float) -> float:
@@ -84,32 +87,85 @@ def sample_distance(eps: float, r: float) -> float:
 
     # Utilise the inverse transform sampling method to sample from the distribution
     X = np.random.uniform(0, 1)
-    x = np.linspace(0, 1, 100)
-    y = [inverse_cdf(x, eps, r) for x in x]
-    plt.plot(x, y)
-    plt.show()
 
     # Use the inverse CDF to sample from the distribution
     return inverse_cdf(X, eps, r)
 
+
 if __name__ == "__main__":
+    # Testing done primarily on ship 368048550
     ship_id = input("Enter a id to plot trajectory: ")
-    df = pd.read_csv(DATASET_FOLDER)
+    df = pd.read_csv(DATASET_PATH)
+    df.drop(
+        labels=[
+            "SOG",
+            "COG",
+            "Heading",
+            "IMO",
+            "Status",
+            "Length",
+            "Width",
+            "Draft",
+            "Cargo",
+            "CallSign",
+            "VesselType",
+            "TransceiverClass",
+        ],
+        axis=1,
+        inplace=True,
+    )
 
     # Filter the dataframe to only include the ship with the given id
-    ship_id_df = df[df["MMSI"] == int(ship_id)]
-    ship_id_gdf = gpd.GeoDataFrame(
-        ship_id_df,
-        geometry=gpd.points_from_xy(ship_id_df.LON, ship_id_df.LAT),
-    )
+    ship_id_df = df.loc[df["MMSI"] == int(ship_id)]
+
+    # Stores the resultant privatised trajectory after applying exponential mechanism
+    privatised_locations = {
+        "LAT": [ship_id_df.LAT.iloc[0]],
+        "LON": [ship_id_df.LON.iloc[0]],
+    }
+
+    for i in range(1, len(ship_id_df) - 1):
+        geodesic_solution = Geodesic.WGS84.Inverse(
+            privatised_locations["LAT"][-1],
+            privatised_locations["LON"][-1],
+            ship_id_df.LAT.iloc[i],
+            ship_id_df.LON.iloc[i],
+        )
+        distance = geodesic_solution["s12"]  # Distance in metres
+        angle = (geodesic_solution["azi1"] % 360) * np.pi / 180  # Angle in [0, 2pi]
+
+        # Sample a distance and angle from the given distributions
+        sampled_distance = sample_distance(EPSILON, distance)
+        sampled_angle = sample_angle(EPSILON, angle) * 180 / (np.pi)
+        print(
+            f"{distance} and {angle} -> {sampled_distance} and {sampled_angle}({sampled_angle*np.pi/180})"
+        )
+
+        # Calculate the new latitude and longitude
+        geodesic_solution = Geodesic.WGS84.Direct(
+            ship_id_df.LAT.iloc[i],
+            ship_id_df.LON.iloc[i],
+            sampled_angle,
+            sampled_distance,
+        )
+        privatised_locations["LAT"].append(geodesic_solution["lat2"])
+        privatised_locations["LON"].append(geodesic_solution["lon2"])
+
+    privatised_locations["LAT"].append(ship_id_df.LAT.iloc[-1])
+    privatised_locations["LON"].append(ship_id_df.LON.iloc[-1])
+    privatised_df = pd.DataFrame(privatised_locations)
+
+    print(ship_id_df)
+    print(privatised_df)
 
     # Plot the trajectory and the start and end points
     plt.xlabel("Longitude")
     plt.ylabel("Latitude")
     plt.title(f"Trajectory of ship {ship_id}")
+
     plt.plot(
-        ship_id_gdf.LON,
-        ship_id_gdf.LAT,
+        ship_id_df.LON,
+        ship_id_df.LAT,
         linewidth=1,
         linestyle="--",
         color="green",
@@ -117,6 +173,22 @@ if __name__ == "__main__":
         markersize=5,
         markerfacecolor="red",
     )
-    plt.annotate("Start", (ship_id_gdf.LON.iloc[0], ship_id_gdf.LAT.iloc[0]))
-    plt.annotate("End", (ship_id_gdf.LON.iloc[-1], ship_id_gdf.LAT.iloc[-1]))
+    plt.annotate("Start", (ship_id_df.LON.iloc[0], ship_id_df.LAT.iloc[0]))
+    plt.annotate("End", (ship_id_df.LON.iloc[-1], ship_id_df.LAT.iloc[-1]))
+    plt.ticklabel_format(useOffset=False)
+
+    plt.plot(
+        privatised_df.LON,
+        privatised_df.LAT,
+        linewidth=1,
+        linestyle="--",
+        color="blue",
+        marker="o",
+        markersize=5,
+        markerfacecolor="orange",
+    )
+    # plt.annotate("Start", (ship_id_df.LON.iloc[0], ship_id_df.LAT.iloc[0]))
+    # plt.annotate("End", (ship_id_df.LON.iloc[-1], ship_id_df.LAT.iloc[-1]))
+    plt.ticklabel_format(useOffset=False)
+
     plt.show()
