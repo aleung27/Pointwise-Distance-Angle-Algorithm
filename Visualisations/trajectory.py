@@ -2,161 +2,187 @@ import pandas as pd
 import os
 import numpy as np
 from pathlib import Path
+from typing import Dict, List
 
-import geopandas as gpd
-import matplotlib.pyplot as plt
-from geographiclib.geodesic import Geodesic
+import geopandas as gpd  # type: ignore
+import matplotlib.pyplot as plt  # type: ignore
+from shapely.geometry import Point  # type: ignore
+
+from adapted_sampling_method import AdapatedSamplingMethod
 
 DATASET_PATH = os.path.join(Path(__file__).parent.parent, "AIS_2019_01_01.csv")
+EXCESS_COLUMNS = [
+    "SOG",
+    "COG",
+    "Heading",
+    "IMO",
+    "Status",
+    "Length",
+    "Width",
+    "Draft",
+    "Cargo",
+    "CallSign",
+    "VesselType",
+    "TransceiverClass",
+]
 
 WEB_MERCATOR = "EPSG:3857"  # Standard flat projection for web maps
 WGS_84 = "EPSG:4326"  # Projection for latitude and longitude
 
-EPSILON = 1  # Privacy parameter
 
+class Privatiser:
+    ship_id: str
+    method: AdapatedSamplingMethod
+    gdf: gpd.GeoDataFrame
 
-def sample_angle(eps: float, theta: float) -> float:
-    """
-    Samples an angle theta according to the pdf given by
-    Pr(θ) = C*exp(ε*(2π - |α_i-θ|)/4π)
-    Here we have:
-    Δu = 2π, u(α, θ) = 2π - |α-θ| where θ, α ∈ [0, 2π]
-    1/C = 4π[2e^(ε/2)-e^(ε(2π-θ)/4π)-e^(εθ/4π)]/ε
-    which gives a pdf with area 1.
+    def __init__(self, method: AdapatedSamplingMethod) -> None:
+        self.method = method
+        self.gdf = self.process_initial_data()
 
-    The utility function generates maximum utility when the angle
-    between the ship's projected angle to the next point and its
-    noisy estimate is 0.
-    """
-    exp_factor = 4 * np.pi / eps
+    @classmethod
+    def calculate_euclidean_error(
+        cls, gdf1: gpd.GeoDataFrame, gdf2: gpd.GeoDataFrame
+    ) -> float:
+        """
+        Calculates the Euclidean distance between two points
+        """
+        error = 0.0
 
-    def inverse_cdf(X: float, eps: float, theta: float) -> float:
-        # Constant from PDF
-        C = (
-            2 * np.exp(eps / 2)
-            - np.exp((2 * np.pi - theta) / exp_factor)
-            - np.exp(theta / exp_factor)
-        )
-
-        # This is the inverted piece for when angles are in the range [0, theta]
-        piecewise_A = (
-            theta
-            - 2 * np.pi
-            + np.log(C * X + np.exp((2 * np.pi - theta) / exp_factor)) * exp_factor
-        )
-
-        # This is the inverted piece for when angles are in the range [theta, 2pi]
-        piecewise_B = (
-            theta
-            + 2 * np.pi
-            - np.log(
-                -C * X + 2 * np.exp(eps / 2) - np.exp((2 * np.pi - theta) / exp_factor)
+        for i in range(len(gdf1)):
+            point1 = gdf1.geometry.iloc[i]
+            point2 = gdf2.geometry.iloc[i]
+            error += np.linalg.norm(
+                np.array([point1.x - point2.x, point1.y - point2.y])
             )
-            * exp_factor
+
+        return error
+
+    def process_initial_data(self) -> gpd.GeoDataFrame:
+        """
+        Process the initial data according to a given input ship id
+        """
+
+        # Testing done primarily on ship 368048550
+        self.ship_id = input("Enter a id to plot trajectory: ")
+
+        df = pd.read_csv(DATASET_PATH)
+        df = df.loc[df["MMSI"] == int(self.ship_id)]
+        df.drop(
+            labels=EXCESS_COLUMNS,
+            axis=1,
+            inplace=True,
         )
 
-        # Return the correct piecewise function depending on the resultant value of the inverse
-        if 0 <= piecewise_A < theta:
-            return piecewise_A
-        elif theta <= piecewise_B <= 2 * np.pi:
-            return piecewise_B
+        # Convert to GeoDataFrame with web mercator projection of lat, lon
+        df = gpd.GeoDataFrame(
+            df,
+            geometry=gpd.points_from_xy(df.LON, df.LAT),
+            crs=WGS_84,
+        )
 
-    # Utilise the inverse transform sampling method to sample from the distribution
-    X = np.random.uniform(0, 1)
+        return df.to_crs(WEB_MERCATOR)
 
-    # Use the inverse CDF to sample from the distribution
-    return inverse_cdf(X, eps, theta)
+    def privatise_trajectory(self, eps: float) -> gpd.GeoDataFrame:
+        """
+        Privatises the trajectory of a ship using the exponential mechanism
+        from the given method.
+        """
 
+        # Privatised route starts and ends at the same location as the real route
+        privatised = {
+            "geometry": [self.gdf.geometry.iloc[0]],
+        }
 
-def sample_distance(eps: float, r: float) -> float:
-    """
-    Samples a distance according to the pdf given by
-    Pr(r) = C*exp(ε*(r-x)/2r)
-    Here we have:
-    Δu = r, u(r, x) = r - x where x ∈ [0, r]
-    1/C = 2r(e^(ε/2)-1)/ε
-    which gives a pdf with area 1.
+        for i in range(1, len(self.gdf) - 1):
+            # The current (real) point and the last (privatised) point
+            current_point: Point = self.gdf.geometry.iloc[i]
+            last_estimate: Point = privatised["geometry"][-1]
 
-    The utility function generates maximum utility when the distance
-    between ship's current private position and the next point in the location
-    data is as minimal as possible
-    """
+            # Get the distance and angle from the vector between the two points
+            v = np.array(
+                [
+                    current_point.x - last_estimate.x,
+                    current_point.y - last_estimate.y,
+                ]
+            )
+            distance = np.linalg.norm(v)
+            angle = (np.arctan2(v[1], v[0]) + 2 * np.pi) % (2 * np.pi)
 
-    def inverse_cdf(X: float, eps: float, r: float) -> float:
-        return r - 2 * r * np.log(np.exp(eps / 2) + (1 - np.exp(eps / 2)) * X) / eps
+            # Sample a distance and angle from the given distributions
+            sampled_distance = self.method.sample_distance(eps, distance)
+            sampled_angle = self.method.sample_angle(eps, angle)
 
-    # Utilise the inverse transform sampling method to sample from the distribution
-    X = np.random.uniform(0, 1)
+            # Calculate the new point at angle sampled_angle in a circle of radius sampled_distance
+            privatised["geometry"].append(
+                Point(
+                    current_point.x + sampled_distance * np.cos(sampled_angle),
+                    current_point.y + sampled_distance * np.sin(sampled_angle),
+                )
+            )
 
-    # Use the inverse CDF to sample from the distribution
-    return inverse_cdf(X, eps, r)
+        privatised["geometry"].append(self.gdf.geometry.iloc[-1])
+        return gpd.GeoDataFrame(privatised, geometry="geometry", crs=WEB_MERCATOR)
+
+    def generate_mean_max_errors(self) -> Dict[str, List[float]]:
+        """
+        Generates the mean and max errors for the given method
+        We run 5 tests with values of epsilon [0.01, 0.1, 1, 10, 100]
+        Each test is run 500 times and the mean and max errors are calculated
+        """
+        result: Dict[str, List[float]] = {"eps": [], "mean": [], "max": []}
+
+        for eps in [0.01, 0.1, 1, 10, 100]:
+            total_error = 0.0
+            max_error = 0.0
+            iterations = 1000
+
+            for _ in range(iterations):
+                privatised_df = self.privatise_trajectory(eps)
+                error = self.calculate_euclidean_error(self.gdf, privatised_df)
+                total_error += error
+                max_error = max(max_error, error)
+
+            mean = total_error / iterations
+
+            result["eps"].append(eps)
+            result["mean"].append(mean)
+            result["max"].append(max_error)
+
+        return result
 
 
 if __name__ == "__main__":
-    # Testing done primarily on ship 368048550
-    ship_id = input("Enter a id to plot trajectory: ")
-    df = pd.read_csv(DATASET_PATH)
-    df.drop(
-        labels=[
-            "SOG",
-            "COG",
-            "Heading",
-            "IMO",
-            "Status",
-            "Length",
-            "Width",
-            "Draft",
-            "Cargo",
-            "CallSign",
-            "VesselType",
-            "TransceiverClass",
-        ],
-        axis=1,
-        inplace=True,
-    )
+    privatiser = Privatiser(AdapatedSamplingMethod())
 
-    # Filter the dataframe to only include the ship with the given id
-    ship_id_df = df.loc[df["MMSI"] == int(ship_id)]
+    ship_id = privatiser.ship_id
+    df = privatiser.gdf
+    privatised_df = privatiser.privatise_trajectory(0.01)
 
-    # Stores the resultant privatised trajectory after applying exponential mechanism
-    privatised_locations = {
-        "LAT": [ship_id_df.LAT.iloc[0]],
-        "LON": [ship_id_df.LON.iloc[0]],
-    }
-
-    for i in range(1, len(ship_id_df) - 1):
-        geodesic_solution = Geodesic.WGS84.Inverse(
-            privatised_locations["LAT"][-1],
-            privatised_locations["LON"][-1],
-            ship_id_df.LAT.iloc[i],
-            ship_id_df.LON.iloc[i],
-        )
-        distance = geodesic_solution["s12"]  # Distance in metres
-        angle = (geodesic_solution["azi1"] % 360) * np.pi / 180  # Angle in [0, 2pi]
-
-        # Sample a distance and angle from the given distributions
-        sampled_distance = sample_distance(EPSILON, distance)
-        sampled_angle = sample_angle(EPSILON, angle) * 180 / (np.pi)
-        print(
-            f"{distance} and {angle} -> {sampled_distance} and {sampled_angle}({sampled_angle*np.pi/180})"
-        )
-
-        # Calculate the new latitude and longitude
-        geodesic_solution = Geodesic.WGS84.Direct(
-            ship_id_df.LAT.iloc[i],
-            ship_id_df.LON.iloc[i],
-            sampled_angle,
-            sampled_distance,
-        )
-        privatised_locations["LAT"].append(geodesic_solution["lat2"])
-        privatised_locations["LON"].append(geodesic_solution["lon2"])
-
-    privatised_locations["LAT"].append(ship_id_df.LAT.iloc[-1])
-    privatised_locations["LON"].append(ship_id_df.LON.iloc[-1])
-    privatised_df = pd.DataFrame(privatised_locations)
-
-    print(ship_id_df)
-    print(privatised_df)
+    # res = privatiser.generate_mean_max_errors()
+    # plt.plot(
+    #     res["eps"],
+    #     res["mean"],
+    #     label="Mean",
+    #     linewidth=1,
+    #     linestyle="-",
+    #     color="red",
+    #     marker="o",
+    #     markersize=5,
+    #     markerfacecolor="red",
+    # )
+    # plt.plot(
+    #     res["eps"],
+    #     res["max"],
+    #     label="Max",
+    #     linewidth=1,
+    #     linestyle="-",
+    #     color="blue",
+    #     marker="o",
+    #     markersize=5,
+    #     markerfacecolor="blue",
+    # )
+    # plt.xscale("log")
+    # plt.show()
 
     # Plot the trajectory and the start and end points
     plt.xlabel("Longitude")
@@ -164,8 +190,8 @@ if __name__ == "__main__":
     plt.title(f"Trajectory of ship {ship_id}")
 
     plt.plot(
-        ship_id_df.LON,
-        ship_id_df.LAT,
+        df.geometry.x,
+        df.geometry.y,
         linewidth=1,
         linestyle="--",
         color="green",
@@ -173,13 +199,9 @@ if __name__ == "__main__":
         markersize=5,
         markerfacecolor="red",
     )
-    plt.annotate("Start", (ship_id_df.LON.iloc[0], ship_id_df.LAT.iloc[0]))
-    plt.annotate("End", (ship_id_df.LON.iloc[-1], ship_id_df.LAT.iloc[-1]))
-    plt.ticklabel_format(useOffset=False)
-
     plt.plot(
-        privatised_df.LON,
-        privatised_df.LAT,
+        privatised_df.geometry.x,
+        privatised_df.geometry.y,
         linewidth=1,
         linestyle="--",
         color="blue",
@@ -187,8 +209,10 @@ if __name__ == "__main__":
         markersize=5,
         markerfacecolor="orange",
     )
-    # plt.annotate("Start", (ship_id_df.LON.iloc[0], ship_id_df.LAT.iloc[0]))
-    # plt.annotate("End", (ship_id_df.LON.iloc[-1], ship_id_df.LAT.iloc[-1]))
+
+    plt.annotate("Start", (df.geometry.iloc[0].x, df.geometry.iloc[0].y))
+    plt.annotate("End", (df.geometry.iloc[-1].x, df.geometry.iloc[-1].y))
+    plt.axis("square")
     plt.ticklabel_format(useOffset=False)
 
     plt.show()
