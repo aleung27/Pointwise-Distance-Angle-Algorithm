@@ -8,7 +8,9 @@ import geopandas as gpd  # type: ignore
 import matplotlib.pyplot as plt  # type: ignore
 from shapely.geometry import Point  # type: ignore
 
+from sample_method import SampleMethod
 from adapted_sampling_method import AdapatedSamplingMethod
+from sdd import SampleDistanceDirection
 
 DATASET_PATH = os.path.join(Path(__file__).parent.parent, "AIS_2019_01_01.csv")
 EXCESS_COLUMNS = [
@@ -32,11 +34,9 @@ WGS_84 = "EPSG:4326"  # Projection for latitude and longitude
 
 class Privatiser:
     ship_id: str
-    method: AdapatedSamplingMethod
     gdf: gpd.GeoDataFrame
 
-    def __init__(self, method: AdapatedSamplingMethod) -> None:
-        self.method = method
+    def __init__(self) -> None:
         self.gdf = self.process_initial_data()
 
     @classmethod
@@ -82,137 +82,146 @@ class Privatiser:
 
         return df.to_crs(WEB_MERCATOR)
 
-    def privatise_trajectory(self, eps: float) -> gpd.GeoDataFrame:
-        """
-        Privatises the trajectory of a ship using the exponential mechanism
-        from the given method.
-        """
-
-        # Privatised route starts and ends at the same location as the real route
-        privatised = {
-            "geometry": [self.gdf.geometry.iloc[0]],
-        }
-
-        for i in range(1, len(self.gdf) - 1):
-            # The current (real) point and the last (privatised) point
-            current_point: Point = self.gdf.geometry.iloc[i]
-            last_estimate: Point = privatised["geometry"][-1]
-
-            # Get the distance and angle from the vector between the two points
-            v = np.array(
-                [
-                    current_point.x - last_estimate.x,
-                    current_point.y - last_estimate.y,
-                ]
-            )
-            distance = np.linalg.norm(v)
-            angle = (np.arctan2(v[1], v[0]) + 2 * np.pi) % (2 * np.pi)
-
-            # Sample a distance and angle from the given distributions
-            sampled_distance = self.method.sample_distance(eps, distance)
-            sampled_angle = self.method.sample_angle(eps, angle)
-
-            # Calculate the new point at angle sampled_angle in a circle of radius sampled_distance
-            privatised["geometry"].append(
-                Point(
-                    current_point.x + sampled_distance * np.cos(sampled_angle),
-                    current_point.y + sampled_distance * np.sin(sampled_angle),
-                )
-            )
-
-        privatised["geometry"].append(self.gdf.geometry.iloc[-1])
-        return gpd.GeoDataFrame(privatised, geometry="geometry", crs=WEB_MERCATOR)
-
-    def generate_mean_max_errors(self) -> Dict[str, List[float]]:
+    def generate_mean_max_errors(self, methods: List[SampleMethod]) -> pd.DataFrame:
         """
         Generates the mean and max errors for the given method
         We run 5 tests with values of epsilon [0.01, 0.1, 1, 10, 100]
-        Each test is run 500 times and the mean and max errors are calculated
+        Each test is run 1000 times and the mean and max errors are calculated
         """
-        result: Dict[str, List[float]] = {"eps": [], "mean": [], "max": []}
+        result: Dict[str, List[float | str]] = {
+            "method": [],
+            "eps": [],
+            "mean": [],
+            "max": [],
+        }
+        iterations = 500
 
-        for eps in [0.01, 0.1, 1, 10, 100]:
-            total_error = 0.0
-            max_error = 0.0
-            iterations = 1000
+        for m in methods:
+            for eps in [0.01, 0.1, 1, 10, 100]:
+                total_error = 0.0
+                max_error = 0.0
 
-            for _ in range(iterations):
-                privatised_df = self.privatise_trajectory(eps)
-                error = self.calculate_euclidean_error(self.gdf, privatised_df)
-                total_error += error
-                max_error = max(max_error, error)
+                for _ in range(iterations):
+                    privatised_df = m.privatise_trajectory(self.gdf, eps)
+                    error = self.calculate_euclidean_error(self.gdf, privatised_df)
 
-            mean = total_error / iterations
+                    total_error += error
+                    max_error = max(max_error, error)
 
-            result["eps"].append(eps)
-            result["mean"].append(mean)
-            result["max"].append(max_error)
+                mean = total_error / iterations
 
-        return result
+                result["method"].append(m.__class__.__name__)
+                result["eps"].append(eps)
+                result["mean"].append(mean)
+                result["max"].append(max_error)
+
+        return pd.DataFrame.from_dict(result)
 
 
 if __name__ == "__main__":
-    privatiser = Privatiser(AdapatedSamplingMethod())
+    privatiser = Privatiser()
 
     ship_id = privatiser.ship_id
     df = privatiser.gdf
-    privatised_df = privatiser.privatise_trajectory(0.01)
 
-    # res = privatiser.generate_mean_max_errors()
-    # plt.plot(
-    #     res["eps"],
-    #     res["mean"],
-    #     label="Mean",
-    #     linewidth=1,
-    #     linestyle="-",
-    #     color="red",
-    #     marker="o",
-    #     markersize=5,
-    #     markerfacecolor="red",
-    # )
-    # plt.plot(
-    #     res["eps"],
-    #     res["max"],
-    #     label="Max",
-    #     linewidth=1,
-    #     linestyle="-",
-    #     color="blue",
-    #     marker="o",
-    #     markersize=5,
-    #     markerfacecolor="blue",
-    # )
-    # plt.xscale("log")
-    # plt.show()
+    sdd_gdf = SampleDistanceDirection().privatise_trajectory(df, 1)
+    asm_gdf = AdapatedSamplingMethod().privatise_trajectory(df, 1)
 
-    # Plot the trajectory and the start and end points
-    plt.xlabel("Longitude")
-    plt.ylabel("Latitude")
-    plt.title(f"Trajectory of ship {ship_id}")
-
+    res = privatiser.generate_mean_max_errors(
+        methods=[SampleDistanceDirection(), AdapatedSamplingMethod()]
+    )
     plt.plot(
-        df.geometry.x,
-        df.geometry.y,
+        res[res["method"] == SampleDistanceDirection.__name__]["eps"],
+        res[res["method"] == SampleDistanceDirection.__name__]["mean"],
+        label="Mean (SDD)",
         linewidth=1,
-        linestyle="--",
-        color="green",
+        linestyle="-",
+        color="red",
         marker="o",
         markersize=5,
         markerfacecolor="red",
     )
     plt.plot(
-        privatised_df.geometry.x,
-        privatised_df.geometry.y,
+        res[res["method"] == SampleDistanceDirection.__name__]["eps"],
+        res[res["method"] == SampleDistanceDirection.__name__]["max"],
+        label="Max (SDD)",
+        linewidth=1,
+        linestyle="--",
+        color="red",
+        marker="o",
+        markersize=5,
+        markerfacecolor="red",
+    )
+    plt.plot(
+        res[res["method"] == AdapatedSamplingMethod.__name__]["eps"],
+        res[res["method"] == AdapatedSamplingMethod.__name__]["mean"],
+        label="Max",
+        linewidth=1,
+        linestyle="-",
+        color="blue",
+        marker="o",
+        markersize=5,
+        markerfacecolor="blue",
+    )
+    plt.plot(
+        res[res["method"] == AdapatedSamplingMethod.__name__]["eps"],
+        res[res["method"] == AdapatedSamplingMethod.__name__]["max"],
+        label="Max",
         linewidth=1,
         linestyle="--",
         color="blue",
         marker="o",
         markersize=5,
-        markerfacecolor="orange",
+        markerfacecolor="blue",
     )
 
-    plt.annotate("Start", (df.geometry.iloc[0].x, df.geometry.iloc[0].y))
-    plt.annotate("End", (df.geometry.iloc[-1].x, df.geometry.iloc[-1].y))
-    plt.axis("square")
-    plt.ticklabel_format(useOffset=False)
+    plt.xlabel("Epsilon (ε)")
+    plt.ylabel("Euclidean Pointwise Error (m)")
+    plt.title(f"Trajectory of ship {ship_id}")
+    plt.xscale("log")
+    plt.legend()
 
     plt.show()
+
+    # Plot the trajectory and the start and end points
+    # plt.xlabel("Longitude")
+    # plt.ylabel("Latitude")
+    # plt.title(f"Trajectory of ship {ship_id}")
+
+    # plt.plot(
+    #     df.geometry.x,
+    #     df.geometry.y,
+    #     linewidth=1,
+    #     linestyle="--",
+    #     color="green",
+    #     marker="o",
+    #     markersize=5,
+    #     markerfacecolor="red",
+    # )
+    # plt.plot(
+    #     asm_gdf.geometry.x,
+    #     asm_gdf.geometry.y,
+    #     linewidth=1,
+    #     linestyle="--",
+    #     color="blue",
+    #     marker="o",
+    #     markersize=5,
+    #     markerfacecolor="orange",
+    # )
+    # plt.plot(
+    #     sdd_gdf.geometry.x,
+    #     sdd_gdf.geometry.y,
+    #     linewidth=1,
+    #     linestyle="--",
+    #     color="yellow",
+    #     marker="o",
+    #     markersize=5,
+    #     markerfacecolor="yellow",
+    # )
+
+    # plt.annotate("Start", (df.geometry.iloc[0].x, df.geometry.iloc[0].y))
+    # plt.annotate("End", (df.geometry.iloc[-1].x, df.geometry.iloc[-1].y))
+    # plt.axis("square")
+    # plt.ticklabel_format(useOffset=False)
+
+    # plt.show()
