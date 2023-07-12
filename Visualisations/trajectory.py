@@ -155,7 +155,7 @@ if __name__ == "__main__":
     plt.plot(
         res[res["method"] == AdapatedSamplingMethod.__name__]["eps"],
         res[res["method"] == AdapatedSamplingMethod.__name__]["mean"],
-        label="Max",
+        label="Mean (ASM)",
         linewidth=1,
         linestyle="-",
         color="blue",
@@ -166,7 +166,7 @@ if __name__ == "__main__":
     plt.plot(
         res[res["method"] == AdapatedSamplingMethod.__name__]["eps"],
         res[res["method"] == AdapatedSamplingMethod.__name__]["max"],
-        label="Max",
+        label="Max (ASM)",
         linewidth=1,
         linestyle="--",
         color="blue",
