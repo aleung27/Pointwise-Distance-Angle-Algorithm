@@ -137,3 +137,9 @@ Data/*
 **/*.png
 **/*.plt
 **/*.pdf
+
+# Shapefiles
+**/*.dbf
+**/*.shp
+**/*.shx
+**/*.prj

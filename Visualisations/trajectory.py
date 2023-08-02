@@ -11,8 +11,12 @@ from shapely.geometry import Point  # type: ignore
 from sample_method import SampleMethod
 from adapted_sampling_method import AdapatedSamplingMethod
 from sdd import SampleDistanceDirection
+from avoidant_sampling_method import AvoidantSamplingMethod
+from constants import WEB_MERCATOR, WGS_84
 
 DATASET_PATH = os.path.join(Path(__file__).parent.parent, "AIS_2019_01_01.csv")
+FLORIDA_COASTLINE = "Shapefiles/florida_coastline.shp"
+
 EXCESS_COLUMNS = [
     "SOG",
     "COG",
@@ -28,16 +32,22 @@ EXCESS_COLUMNS = [
     "TransceiverClass",
 ]
 
-WEB_MERCATOR = "EPSG:3857"  # Standard flat projection for web maps
-WGS_84 = "EPSG:4326"  # Projection for latitude and longitude
+MODES = {
+    "q": "Quit",
+    "p": "Privatise",
+    "e": "Error Comparison",
+    "r": "Region Testing Visualisation (Avoidant Sampling Method)",
+}
+TESTING_EPSILONS = [0.01, 0.1, 1, 5, 10, 100]
 
 
 class Privatiser:
-    ship_id: str
     gdf: gpd.GeoDataFrame
+    polygons: gpd.GeoDataFrame
 
     def __init__(self) -> None:
-        self.gdf = self.process_initial_data()
+        self.gdf = self.load_initial_data()
+        self.florida_coastline = self.load_florida_coastline()
 
     @classmethod
     def calculate_euclidean_error(
@@ -51,22 +61,14 @@ class Privatiser:
         for i in range(len(gdf1)):
             point1 = gdf1.geometry.iloc[i]
             point2 = gdf2.geometry.iloc[i]
-            error += np.linalg.norm(
-                np.array([point1.x - point2.x, point1.y - point2.y])
+            error += float(
+                np.linalg.norm(np.array([point1.x - point2.x, point1.y - point2.y]))
             )
 
         return error
 
-    def process_initial_data(self) -> gpd.GeoDataFrame:
-        """
-        Process the initial data according to a given input ship id
-        """
-
-        # Testing done primarily on ship 368048550
-        self.ship_id = input("Enter a id to plot trajectory: ")
-
+    def load_initial_data(self) -> gpd.GeoDataFrame:
         df = pd.read_csv(DATASET_PATH)
-        df = df.loc[df["MMSI"] == int(self.ship_id)]
         df.drop(
             labels=EXCESS_COLUMNS,
             axis=1,
@@ -74,154 +76,292 @@ class Privatiser:
         )
 
         # Convert to GeoDataFrame with web mercator projection of lat, lon
-        df = gpd.GeoDataFrame(
+        gdf = gpd.GeoDataFrame(
             df,
             geometry=gpd.points_from_xy(df.LON, df.LAT),
             crs=WGS_84,
         )
 
-        return df.to_crs(WEB_MERCATOR)
+        return gdf.to_crs(WEB_MERCATOR)
 
-    def generate_mean_max_errors(self, methods: List[SampleMethod]) -> pd.DataFrame:
-        """
-        Generates the mean and max errors for the given method
-        We run 5 tests with values of epsilon [0.01, 0.1, 1, 10, 100]
-        Each test is run 1000 times and the mean and max errors are calculated
-        """
-        result: Dict[str, List[float | str]] = {
-            "method": [],
-            "eps": [],
-            "mean": [],
-            "max": [],
-        }
-        iterations = 500
+    def load_florida_coastline(self) -> gpd.GeoDataFrame:
+        florida_coastline = gpd.read_file(FLORIDA_COASTLINE)
 
+        return florida_coastline.to_crs(WEB_MERCATOR)
+
+    def run_command(self):
+        commands = "\n".join([f"\t- {v} ({k})" for k, v in MODES.items()])
+        mode = input(f"Enter a command:\n {commands}\n")
+
+        if mode == "q":
+            exit()
+        elif mode == "p":
+            self.command_privatise()
+        elif mode == "r":
+            self.command_region_testing()
+        elif mode == "e":
+            self.command_error_plot()
+        else:
+            print("Invalid command")
+
+    def command_error_plot(self):
+        """
+        Generates the mean and max errors for each of the given methods
+        for different values of epsilon.
+
+        Results are plotted on a graph.
+        """
+
+        N = 500  # Number of iterations to run for each epsilon value
+        methods: List[SampleMethod] = [
+            SampleDistanceDirection(),
+            AdapatedSamplingMethod(),
+            AvoidantSamplingMethod(self.florida_coastline),
+        ]
+
+        # Filter the data to only include the given ship
+        ship_id = int(input("Enter a ship ID (MMSI): "))
+        gdf = self.gdf.loc[self.gdf["MMSI"] == ship_id]
+
+        # Clear the plot
+        plt.cla()
+        plt.clf()
+        plt.close()
+
+        # For each method, run through each test value of epsilon N times
         for m in methods:
-            for eps in [0.01, 0.1, 1, 10, 100]:
+            res: Dict[str, List[float]] = {
+                "eps": [],
+                "mean": [],
+                "max": [],
+            }
+
+            for eps in TESTING_EPSILONS:
                 total_error = 0.0
                 max_error = 0.0
 
-                for _ in range(iterations):
-                    privatised_df = m.privatise_trajectory(self.gdf, eps)
-                    error = self.calculate_euclidean_error(self.gdf, privatised_df)
+                for _ in range(N):
+                    privatised_df = m.privatise_trajectory(gdf, eps)
+                    error = self.calculate_euclidean_error(gdf, privatised_df)
 
                     total_error += error
                     max_error = max(max_error, error)
 
-                mean = total_error / iterations
+                mean_error = total_error / N
 
-                result["method"].append(m.__class__.__name__)
-                result["eps"].append(eps)
-                result["mean"].append(mean)
-                result["max"].append(max_error)
+                res["eps"].append(eps)
+                res["mean"].append(mean_error)
+                res["max"].append(max_error)
 
-        return pd.DataFrame.from_dict(result)
+            # Plot the results for the given method
+            plt.plot(
+                res["eps"],
+                res["mean"],
+                label=f"Mean ({m.__class__.__name__})",
+                linewidth=1,
+                linestyle="-",
+                color=m.COLOR,
+                marker="o",
+                markersize=5,
+                markerfacecolor=m.COLOR,
+            )
+            plt.plot(
+                res["eps"],
+                res["max"],
+                label=f"Max ({m.__class__.__name__})",
+                linewidth=1,
+                linestyle="--",
+                color=m.COLOR,
+                marker="o",
+                markersize=5,
+                markerfacecolor=m.COLOR,
+            )
+
+        # Configure the axes labels and the title of the plot
+        plt.xlabel("Epsilon (ε)")
+        plt.ylabel("Euclidean Pointwise Error (m)")
+        plt.title(
+            f"Mean and Max Euclidean Error for Different Privitisation Methods (ship {ship_id})"
+        )
+        plt.xscale("log")
+        plt.legend()
+
+        plt.show()
+
+    def command_region_testing(self):
+        """
+        Ask the user to supply a given web mercator point and a radius.
+        Perform a test for sampling angles for different values of epsilon
+        and plot the results on a graph.
+
+        Tested on: p = -9064783 3544363, d = 100
+        Try on -9050513 3481824, d = 1000
+        """
+        N = 500  # Number of samples to take for each epsilon value
+
+        p = input("Enter a space-separated xy coordinate pair: ").split(" ")
+        p = Point(float(p[0]), float(p[1]))
+        d = float(input("Enter a value for the radius to sample at: "))
+
+        sampler = AvoidantSamplingMethod(self.florida_coastline)
+        valid_regions, invalid_regions = sampler.find_restricted_regions(p, d)
+        gdfs = []  # Store the resultant points for each epsilon test
+
+        # For each epsilon value, sample N points and plot them
+        for eps in TESTING_EPSILONS:
+            points = []
+
+            for _ in range(N):
+                angle = sampler._sample_angle(eps, 0, valid_regions, invalid_regions)
+                points.append(Point(p.x + d * np.cos(angle), p.y + d * np.sin(angle)))
+
+            gdfs.append(gpd.GeoDataFrame(geometry=points, crs=WEB_MERCATOR))
+
+        # Plot the given results in one figure with 6 Axes
+        plt.cla()
+        plt.clf()
+        plt.close()
+
+        # 2 rows of 3 columns with shared axes
+        fig, axs = plt.subplots(2, 3, sharex=True, sharey=True, figsize=(10, 10))
+
+        for i in range(len(TESTING_EPSILONS)):
+            ax: plt.Axes = axs[i // 3, i % 3]  # Current axis to plot on
+
+            # Plot the points and circle onto the respective axis as well as the coastline
+            gdfs[i].plot(ax=ax, color="red", alpha=0.1)
+            ax.plot(p.x, p.y, marker="o", markersize=1, color="blue")
+            gpd.GeoDataFrame(geometry=[p.buffer(d).boundary], crs=WEB_MERCATOR).plot(
+                ax=ax, color="blue", alpha=0.5, linestyle="--"
+            )
+            self.florida_coastline.cx[
+                p.x - 2 * d : p.x + 2 * d, p.y - 2 * d : p.y + 2 * d
+            ].plot(ax=ax, color="black", alpha=0.5)
+
+            # Configure the axes labels
+            ax.set_title(f"ε = {TESTING_EPSILONS[i]}")
+            ax.set_xlabel("Lon (Mercator)")
+            ax.set_ylabel("Lat (Mercator)")
+
+        for ax in axs.flat:
+            ax.label_outer()
+
+        # Configure the figure and layout of the subplots
+        fig.suptitle(
+            f"Obstacle Avoidance Sampling Method for Differing Values of Epsilon (N = {N})"
+        )
+        fig.tight_layout()
+        plt.subplots_adjust(wspace=0)
+        plt.show()
+
+    def command_privatise(self):
+        """
+        Privatise a given ship's trajectory using the 3 different methods
+        and plot the results on a graph.
+
+        Florida (matanzas river) Trajectories:
+            - 367597490
+            - 367181030
+            - 368057420
+
+        Small open ocean trajectory:
+            - 368048550
+        """
+
+        # Filter the data to only include the given ship
+        ship_id = int(input("Enter a ship ID (MMSI): "))
+        epsilon = float(input("Enter a value for epsilon (ε): "))
+
+        gdf = self.gdf.loc[self.gdf["MMSI"] == ship_id]
+
+        # Run the privitisation against the 3 current schemes available
+        # sdd_gdf = SampleDistanceDirection().privatise_trajectory(gdf, eps=epsilon)
+        asm_gdf = AdapatedSamplingMethod().privatise_trajectory(gdf, eps=epsilon)
+        avoid_gdf = AvoidantSamplingMethod(self.florida_coastline).privatise_trajectory(
+            gdf, eps=epsilon
+        )
+
+        # Reduce the polygons we plot by forming a bbox of the min & max lat and long
+        gdfs = [gdf, asm_gdf, avoid_gdf]
+        min_lon, min_lat, max_lon, max_lat = (
+            np.min([df.geometry.x.min() for df in gdfs]),
+            np.min([df.geometry.y.min() for df in gdfs]),
+            np.max([df.geometry.x.max() for df in gdfs]),
+            np.max([df.geometry.y.max() for df in gdfs]),
+        )
+
+        # Clear the plot
+        plt.cla()
+        plt.clf()
+        plt.close()
+
+        # Set the axes labels and the title of the plot
+        plt.xlabel("Lon (Mercator)")
+        plt.ylabel("Lat (Mercator)")
+        plt.title(f"Trajectory of Ship {ship_id} Under Different Methods")
+
+        # Plot each of the trajectories
+        plt.plot(
+            gdf.geometry.x,
+            gdf.geometry.y,
+            linewidth=1,
+            linestyle="--",
+            color="green",
+            marker="o",
+            markersize=5,
+            markerfacecolor="green",
+            label="Real Trajectory",
+        )
+        # plt.plot(
+        #     sdd_gdf.geometry.x,
+        #     sdd_gdf.geometry.y,
+        #     linewidth=1,
+        #     linestyle="--",
+        #     color="purple",
+        #     marker="o",
+        #     markersize=5,
+        #     markerfacecolor="purple",
+        #     label="Sample Distance Direction Method",
+        # )
+        plt.plot(
+            asm_gdf.geometry.x,
+            asm_gdf.geometry.y,
+            linewidth=1,
+            linestyle="--",
+            color="blue",
+            marker="o",
+            markersize=5,
+            markerfacecolor="blue",
+            label="Adapted Sampling Method",
+        )
+        plt.plot(
+            avoid_gdf.geometry.x,
+            avoid_gdf.geometry.y,
+            linewidth=1,
+            linestyle="--",
+            color="orange",
+            marker="o",
+            markersize=5,
+            markerfacecolor="orange",
+            label="Avoidant Sampling Method",
+        )
+        self.florida_coastline.cx[min_lon:max_lon, min_lat:max_lat].plot(
+            ax=plt.gca(), color="black", alpha=0.5
+        )
+
+        # Annotate the start and end points of the trajectory
+        plt.annotate("Start", (gdf.geometry.iloc[0].x, gdf.geometry.iloc[0].y))
+        plt.annotate("End", (gdf.geometry.iloc[-1].x, gdf.geometry.iloc[-1].y))
+
+        # Configure the display of the plot and show
+        plt.axis("square")
+        plt.ticklabel_format(useOffset=False)
+        plt.legend()
+        plt.show()
 
 
 if __name__ == "__main__":
     privatiser = Privatiser()
 
-    ship_id = privatiser.ship_id
-    df = privatiser.gdf
-
-    sdd_gdf = SampleDistanceDirection().privatise_trajectory(df, 1)
-    asm_gdf = AdapatedSamplingMethod().privatise_trajectory(df, 1)
-
-    res = privatiser.generate_mean_max_errors(
-        methods=[SampleDistanceDirection(), AdapatedSamplingMethod()]
-    )
-    plt.plot(
-        res[res["method"] == SampleDistanceDirection.__name__]["eps"],
-        res[res["method"] == SampleDistanceDirection.__name__]["mean"],
-        label="Mean (SDD)",
-        linewidth=1,
-        linestyle="-",
-        color="red",
-        marker="o",
-        markersize=5,
-        markerfacecolor="red",
-    )
-    plt.plot(
-        res[res["method"] == SampleDistanceDirection.__name__]["eps"],
-        res[res["method"] == SampleDistanceDirection.__name__]["max"],
-        label="Max (SDD)",
-        linewidth=1,
-        linestyle="--",
-        color="red",
-        marker="o",
-        markersize=5,
-        markerfacecolor="red",
-    )
-    plt.plot(
-        res[res["method"] == AdapatedSamplingMethod.__name__]["eps"],
-        res[res["method"] == AdapatedSamplingMethod.__name__]["mean"],
-        label="Mean (ASM)",
-        linewidth=1,
-        linestyle="-",
-        color="blue",
-        marker="o",
-        markersize=5,
-        markerfacecolor="blue",
-    )
-    plt.plot(
-        res[res["method"] == AdapatedSamplingMethod.__name__]["eps"],
-        res[res["method"] == AdapatedSamplingMethod.__name__]["max"],
-        label="Max (ASM)",
-        linewidth=1,
-        linestyle="--",
-        color="blue",
-        marker="o",
-        markersize=5,
-        markerfacecolor="blue",
-    )
-
-    plt.xlabel("Epsilon (ε)")
-    plt.ylabel("Euclidean Pointwise Error (m)")
-    plt.title(f"Trajectory of ship {ship_id}")
-    plt.xscale("log")
-    plt.legend()
-
-    plt.show()
-
-    # Plot the trajectory and the start and end points
-    # plt.xlabel("Longitude")
-    # plt.ylabel("Latitude")
-    # plt.title(f"Trajectory of ship {ship_id}")
-
-    # plt.plot(
-    #     df.geometry.x,
-    #     df.geometry.y,
-    #     linewidth=1,
-    #     linestyle="--",
-    #     color="green",
-    #     marker="o",
-    #     markersize=5,
-    #     markerfacecolor="red",
-    # )
-    # plt.plot(
-    #     asm_gdf.geometry.x,
-    #     asm_gdf.geometry.y,
-    #     linewidth=1,
-    #     linestyle="--",
-    #     color="blue",
-    #     marker="o",
-    #     markersize=5,
-    #     markerfacecolor="orange",
-    # )
-    # plt.plot(
-    #     sdd_gdf.geometry.x,
-    #     sdd_gdf.geometry.y,
-    #     linewidth=1,
-    #     linestyle="--",
-    #     color="yellow",
-    #     marker="o",
-    #     markersize=5,
-    #     markerfacecolor="yellow",
-    # )
-
-    # plt.annotate("Start", (df.geometry.iloc[0].x, df.geometry.iloc[0].y))
-    # plt.annotate("End", (df.geometry.iloc[-1].x, df.geometry.iloc[-1].y))
-    # plt.axis("square")
-    # plt.ticklabel_format(useOffset=False)
-
-    # plt.show()
+    while True:
+        privatiser.run_command()

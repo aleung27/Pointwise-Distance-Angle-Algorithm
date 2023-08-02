@@ -1,8 +1,13 @@
 from sample_method import SampleMethod
+from constants import WEB_MERCATOR
 
 from typing import List, Tuple
 import numpy as np
 from scipy.stats import rv_continuous  # type: ignore
+from shapely.geometry import Point, LineString  # type: ignore
+import geopandas as gpd  # type: ignore
+
+RegionList = List[Tuple[float, float]]
 
 
 class AvoidantSamplingMethod(SampleMethod):
@@ -11,31 +16,20 @@ class AvoidantSamplingMethod(SampleMethod):
     an angle whilst specifying multiple disjoint regions to avoid.
     """
 
-    # Regions are of the form [lower, upper]. These are sorted and disjoint.
-    avoidance_regions: List[Tuple[float, float]]
-    allowed_regions: List[Tuple[float, float]]
+    COLOR = "orange"
 
-    def __init__(self, avoidance_regions: List[Tuple[float, float]]) -> None:
-        def form_allowed_regions():
-            self.allowed_regions = []
+    boundaries: gpd.GeoDataFrame  # This is the loaded shape of the coastline
 
-            if len(avoidance_regions) == 0:
-                self.allowed_regions.append((0.0, 2 * np.pi))
-                return
+    def __init__(self, boundaries: gpd.GeoDataFrame) -> None:
+        self.boundaries = boundaries
 
-            for i, region in enumerate(avoidance_regions):
-                if not np.isclose(region[0], 0.0):
-                    self.allowed_regions.append(
-                        (avoidance_regions[i - 1][1] if i else 0.0, region[0])
-                    )
-
-            if not np.isclose(avoidance_regions[-1][1], 2 * np.pi):
-                self.allowed_regions.append((avoidance_regions[-1][1], 2 * np.pi))
-
-        self.avoidance_regions = avoidance_regions
-        form_allowed_regions()
-
-    def _sample_angle(self, eps: float, theta: float) -> float:
+    def _sample_angle(
+        self,
+        eps: float,
+        theta: float,
+        valid_regions: RegionList,
+        invalid_regions: RegionList,
+    ) -> float:
         """
         Samples an angle x using the utility function given that
         attempts to probabilistically avoid certain specified regions.
@@ -57,15 +51,15 @@ class AvoidantSamplingMethod(SampleMethod):
             def __init__(
                 self,
                 eps: float,
-                avoidance_regions: List[Tuple[float, float]],
-                allowed_regions: List[Tuple[float, float]],
+                valid_regions: RegionList,
+                invalid_regions: RegionList,
                 *args,
                 **kwargs
             ) -> None:
                 super().__init__(*args, **kwargs)
                 self.eps = eps
-                self.avoidance_regions = avoidance_regions
-                self.allowed_regions = allowed_regions
+                self.valid_regions = valid_regions
+                self.invalid_regions = invalid_regions
 
             def _pdf(self, x, *args):
                 def utility(x: float):
@@ -74,25 +68,23 @@ class AvoidantSamplingMethod(SampleMethod):
                     """
                     return (
                         1
-                        if np.any([r[0] <= x <= r[1] for r in self.allowed_regions])
+                        if np.any([r[0] <= x <= r[1] for r in self.valid_regions])
                         else 0
                     )
 
-                allowed_region_sum = np.sum(
-                    [r[1] - r[0] for r in self.allowed_regions]
+                valid_region_sum = np.sum(
+                    [r[1] - r[0] for r in self.valid_regions]
                 ) * np.exp(self.eps / 2)
-                avoidance_region_sum = np.sum(
-                    [r[1] - r[0] for r in self.avoidance_regions]
-                )
+                invalid_region_sum = np.sum([r[1] - r[0] for r in self.invalid_regions])
 
                 return np.exp(self.eps * utility(x) / 2) * (
-                    1 / (allowed_region_sum + avoidance_region_sum)
+                    1 / (valid_region_sum + invalid_region_sum)
                 )
 
         distribution = DistanceDistribution(
             eps=eps,
-            avoidance_regions=self.avoidance_regions,
-            allowed_regions=self.allowed_regions,
+            valid_regions=valid_regions,
+            invalid_regions=invalid_regions,
             a=0,
             b=2 * np.pi,
         )
@@ -121,3 +113,167 @@ class AvoidantSamplingMethod(SampleMethod):
 
         # Use the inverse CDF to sample from the distribution
         return inverse_cdf(X, eps, r)
+
+    def privatise_trajectory(
+        self, gdf: gpd.GeoDataFrame, eps: float
+    ) -> gpd.GeoDataFrame:
+        """
+        Privatises the trajectory of a ship using our developed method.
+        """
+
+        # Privatised route starts and ends at the same location as the real route
+        privatised = {
+            "geometry": [gdf.geometry.iloc[0]],
+        }
+
+        for i in range(1, len(gdf) - 1):
+            # The current (real) point and the last (privatised) point
+            current_point: Point = gdf.geometry.iloc[i]
+            last_estimate: Point = privatised["geometry"][-1]
+
+            # Get the distance and angle from the vector between the two points
+            # Angle is positive going counterclockwise from the positive x-axis
+            v = np.array(
+                [
+                    current_point.x - last_estimate.x,
+                    current_point.y - last_estimate.y,
+                ]
+            )
+            distance = np.linalg.norm(v)
+            angle = (np.arctan2(v[1], v[0]) + 2 * np.pi) % (2 * np.pi)
+
+            # Sample a distance and angle from the given distributions
+            sampled_distance = self._sample_distance(eps, distance)  # type: ignore
+            valid_regions, invalid_regions = self.find_restricted_regions(
+                current_point, sampled_distance
+            )
+            print(valid_regions, invalid_regions)
+            sampled_angle = self._sample_angle(
+                eps, angle, valid_regions, invalid_regions
+            )
+            # print(
+            #     f"Distance {distance} & angle {angle} -> Distance {sampled_distance} & angle {sampled_angle}"
+            # )
+
+            # Calculate the new point at angle sampled_angle in a circle of radius sampled_distance
+            privatised["geometry"].append(
+                Point(
+                    current_point.x + sampled_distance * np.cos(sampled_angle),
+                    current_point.y + sampled_distance * np.sin(sampled_angle),
+                )
+            )
+
+        privatised["geometry"].append(gdf.geometry.iloc[-1])
+        return gpd.GeoDataFrame(privatised, geometry="geometry", crs=WEB_MERCATOR)
+
+    def _raycast_intersections(
+        self,
+        region: Tuple[float, float],
+        intersecting_boundaries: gpd.GeoDataFrame,
+        point: Point,
+        distance: float,
+    ) -> int:
+        """
+        Perform a raycast from from the given point to a point in the middle of the region lying on the circle's boundary.
+        """
+
+        # Get a point in the middle of the region that lies on the circle arc
+        midpt = Point(
+            point.x + distance * np.cos(np.mean(region)),
+            point.y + distance * np.sin(np.mean(region)),
+        )
+
+        # Form a line string object from the centre of the circle to the midpoint
+        line_gdf = gpd.GeoDataFrame(
+            geometry=[LineString([point, midpt])], crs=WEB_MERCATOR
+        )
+
+        # Perform an intersection with the coastline to see how many times it crosses a segment
+        intersection = line_gdf.overlay(
+            intersecting_boundaries, how="intersection", keep_geom_type=False
+        )
+
+        # You get 0 or more geometries that are either a Point or MultiPoint
+        intersection_pts = 0
+        for geometry in intersection.geometry:
+            if geometry.geom_type == "Point":
+                intersection_pts += 1
+            else:
+                intersection_pts += len(geometry.geoms)
+
+        return intersection_pts
+
+    def find_restricted_regions(
+        self, point: Point, distance: float
+    ) -> Tuple[RegionList, RegionList]:
+        """
+        Given a point and a distance, find the regions of the circle that are restricted by the coastline.
+
+        Assumptions:
+        - Original point lies within the valid "region" <- can perform raycasting algorithm to check this?
+        """
+
+        # Polygon representing the point with radius given by distance
+        buffered_point = point.buffer(distance)
+
+        # Perform 2 intersections with the coastline map, yielding a MultiLineString of
+        # coastline lying within the buffered point and a MultiPoint of the circle circumference intersection
+        intersection_boundaries_gdf = gpd.overlay(
+            self.boundaries,
+            gpd.GeoDataFrame(geometry=[buffered_point], crs=WEB_MERCATOR),
+            how="intersection",
+        )
+        intersection_points_gdf = gpd.overlay(
+            self.boundaries,
+            gpd.GeoDataFrame(geometry=[buffered_point.boundary], crs=WEB_MERCATOR),
+            how="intersection",
+            keep_geom_type=False,
+        )
+        intersection_points = []
+
+        # Resultant geometries should either be Point or MultiPoint
+        for geometry in intersection_points_gdf.geometry:
+            if geometry.geom_type == "Point":
+                intersection_points.append(geometry)
+            else:
+                intersection_points.extend([Point(p.x, p.y) for p in geometry.geoms])
+
+        # For each of the intersection points we want to find the angle formed between the buffered point
+        # which divides it into regions.
+        angles = []
+        for p in intersection_points:
+            v = np.array([p.x - point.x, p.y - point.y])
+            angles.append((np.arctan2(v[1], v[0]) + 2 * np.pi) % (2 * np.pi))
+        angles.sort()
+
+        # We now need to form the regions of the circle that are created by the intersection points
+        # represented as ranges of angles. N intersections results in N+1 ranges.
+        valid_regions = []
+        invalid_regions = []
+
+        if len(angles) == 0:
+            valid_regions.append((0.0, 2 * np.pi))
+        else:
+            for i in range(len(angles)):
+                region = (angles[i], angles[(i + 1) % len(angles)])
+
+                # Test the region by casting a ray from the point to the midpoint of the region
+                # Odd number of intersections means the region is invalid and vice versa
+                # <technically its opposite to the region the point is in but by assumption this is fine>
+                if region[1] < region[0]:
+                    # This means the region wraps around the circle
+                    # Break it into two regions and add them separately
+                    region_A = (region[0], 2 * np.pi)
+                    region_B = (0.0, region[1])
+                    valid_regions.append(region_A) if self._raycast_intersections(
+                        region_A, intersection_boundaries_gdf, point, distance
+                    ) % 2 == 0 else invalid_regions.append(region_A)
+                    valid_regions.append(region_B) if self._raycast_intersections(
+                        region_B, intersection_boundaries_gdf, point, distance
+                    ) % 2 == 0 else invalid_regions.append(region_B)
+                else:
+                    valid_regions.append(region) if self._raycast_intersections(
+                        region, intersection_boundaries_gdf, point, distance
+                    ) % 2 == 0 else invalid_regions.append(region)
+
+        return (valid_regions, invalid_regions)

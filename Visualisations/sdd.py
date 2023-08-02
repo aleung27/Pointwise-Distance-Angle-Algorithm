@@ -13,6 +13,8 @@ class SampleDistanceDirection(SampleMethod):
     Contains the Sample Distance and Direction (SDD) sampling functions.
     """
 
+    COLOR = "purple"
+
     def _sample_angle(self, eps: float, theta: float) -> float:
         """
         Samples an angle theta according to the SDD method given by
@@ -114,7 +116,7 @@ class SampleDistanceDirection(SampleMethod):
         """
 
         def euclidean_distance(a: Point, b: Point) -> float:
-            return np.linalg.norm(np.array([a.x - b.x, a.y - b.y]))
+            return float(np.linalg.norm(np.array([a.x - b.x, a.y - b.y])))
 
         # Privatised route starts and ends at the same location as the real route
         privatised = {
@@ -141,7 +143,7 @@ class SampleDistanceDirection(SampleMethod):
                     current_point.y - last_estimate.y,
                 ]
             )
-            distance = np.linalg.norm(v)
+            distance = float(np.linalg.norm(v))
             angle = (np.arctan2(v[1], v[0]) + 2 * np.pi) % (2 * np.pi)
 
             while True:
