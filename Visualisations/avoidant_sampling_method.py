@@ -61,24 +61,36 @@ class AvoidantSamplingMethod(SampleMethod):
                 self.valid_regions = valid_regions
                 self.invalid_regions = invalid_regions
 
-            def _pdf(self, x, *args):
-                def utility(x: float):
-                    """
-                    This is the utility function for the angle sampling method.
-                    """
-                    return (
-                        1
-                        if np.any([r[0] <= x <= r[1] for r in self.valid_regions])
-                        else 0
-                    )
-
-                valid_region_sum = np.sum(
+            def _cdf(self, x, *args):
+                complete_valid_region_sum = np.sum(
                     [r[1] - r[0] for r in self.valid_regions]
                 ) * np.exp(self.eps / 2)
-                invalid_region_sum = np.sum([r[1] - r[0] for r in self.invalid_regions])
+                complete_invalid_region_sum = np.sum(
+                    [r[1] - r[0] for r in self.invalid_regions]
+                )
 
-                return np.exp(self.eps * utility(x) / 2) * (
-                    1 / (valid_region_sum + invalid_region_sum)
+                valid_region_sum = 0
+                invalid_region_sum = 0
+                for r in self.valid_regions:
+                    if r[1] <= x:
+                        # Region is completely below x
+                        valid_region_sum += r[1] - r[0]
+                    elif r[0] <= x <= r[1]:
+                        # Region intersects x
+                        valid_region_sum += x - r[0]
+
+                for r in self.invalid_regions:
+                    if r[1] <= x:
+                        # Region is completely below x
+                        invalid_region_sum += r[1] - r[0]
+                    elif r[0] <= x <= r[1]:
+                        # Region intersects x
+                        invalid_region_sum += x - r[0]
+
+                valid_region_sum *= np.exp(self.eps / 2)
+
+                return (valid_region_sum + invalid_region_sum) / (
+                    complete_valid_region_sum + complete_invalid_region_sum
                 )
 
         distribution = DistanceDistribution(
