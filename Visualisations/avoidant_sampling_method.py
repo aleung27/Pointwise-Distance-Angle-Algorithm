@@ -1,10 +1,12 @@
 from sample_method import SampleMethod
 from constants import WEB_MERCATOR
-
-from typing import List, Tuple
+from math import inf
+from typing import List, Tuple, Dict
 import numpy as np
 from scipy.stats import rv_continuous  # type: ignore
 from shapely.geometry import Point, LineString  # type: ignore
+from shapely.ops import nearest_points  # type: ignore
+from shapely import offset_curve  # type: ignore
 import geopandas as gpd  # type: ignore
 
 RegionList = List[Tuple[float, float]]
@@ -54,7 +56,7 @@ class AvoidantSamplingMethod(SampleMethod):
                 valid_regions: RegionList,
                 invalid_regions: RegionList,
                 *args,
-                **kwargs
+                **kwargs,
             ) -> None:
                 super().__init__(*args, **kwargs)
                 self.eps = eps
@@ -134,8 +136,9 @@ class AvoidantSamplingMethod(SampleMethod):
         """
 
         # Privatised route starts and ends at the same location as the real route
-        privatised = {
+        privatised: Dict[str, List[Point | bool]] = {
             "geometry": [gdf.geometry.iloc[0]],
+            "valid": [True],
         }
 
         for i in range(1, len(gdf) - 1):
@@ -159,10 +162,16 @@ class AvoidantSamplingMethod(SampleMethod):
             valid_regions, invalid_regions = self.find_restricted_regions(
                 current_point, sampled_distance
             )
-            print(valid_regions, invalid_regions)
+            # print(valid_regions, invalid_regions)
             sampled_angle = self._sample_angle(
                 eps, angle, valid_regions, invalid_regions
             )
+
+            valid = True
+            if any([ir[0] <= sampled_angle <= ir[1] for ir in invalid_regions]):
+                # If the sampled angle lies in an invalid region, mark it for post processing
+                valid = False
+
             # print(
             #     f"Distance {distance} & angle {angle} -> Distance {sampled_distance} & angle {sampled_angle}"
             # )
@@ -174,8 +183,10 @@ class AvoidantSamplingMethod(SampleMethod):
                     current_point.y + sampled_distance * np.sin(sampled_angle),
                 )
             )
+            privatised["valid"].append(valid)
 
         privatised["geometry"].append(gdf.geometry.iloc[-1])
+        privatised["valid"].append(True)
         return gpd.GeoDataFrame(privatised, geometry="geometry", crs=WEB_MERCATOR)
 
     def _raycast_intersections(
@@ -289,3 +300,45 @@ class AvoidantSamplingMethod(SampleMethod):
                     ) % 2 == 0 else invalid_regions.append(region)
 
         return (valid_regions, invalid_regions)
+
+    def postprocess_result(
+        self, trajectory: gpd.GeoDataFrame, buffer: float = 0
+    ) -> gpd.GeoDataFrame:
+        trajectory = trajectory.copy()
+
+        for i in range(len(trajectory)):
+            if not trajectory.valid.iloc[i]:
+                # If the point is invalid, find the closest valid point
+                # on the boundary from the privatised point and replace it
+                pt = trajectory.geometry.iloc[i]
+                closest_pt: Point = None
+                closest_distance = inf
+
+                for line in self.boundaries.geometry:
+                    # Generate the a positive, negative and no offset on either side of the geom
+                    lines = [
+                        line,
+                        offset_curve(line, buffer),
+                        offset_curve(line, -buffer),
+                    ]
+                    candidates: Point = []
+
+                    for l in lines:
+                        try:
+                            candidates.append(nearest_points(l, pt)[0])
+                        except ValueError:
+                            # Skip empty geometries
+                            pass
+
+                    # Get the furthest point out of all candidate points as we want to buffer into valid areas
+                    candidate = max(candidates, key=lambda p: p.distance(pt))
+                    dist = candidate.distance(pt)
+
+                    if dist < closest_distance:
+                        closest_pt = candidate
+                        closest_distance = dist
+
+                print(f"Replacing {pt} with {closest_pt}")
+                trajectory.geometry.iloc[i] = closest_pt
+
+        return trajectory.drop(columns=["valid"])

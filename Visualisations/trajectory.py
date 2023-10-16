@@ -197,7 +197,7 @@ class Privatiser:
         Tested on: p = -9064783 3544363, d = 100
         Try on -9050513 3481824, d = 1000
         """
-        N = 500  # Number of samples to take for each epsilon value
+        N = 1  # Number of samples to take for each epsilon value
 
         p = input("Enter a space-separated xy coordinate pair: ").split(" ")
         p = Point(float(p[0]), float(p[1]))
@@ -280,6 +280,9 @@ class Privatiser:
         avoid_gdf = AvoidantSamplingMethod(self.florida_coastline).privatise_trajectory(
             gdf, eps=epsilon
         )
+        postprocessed_avoid_gdf = AvoidantSamplingMethod(
+            self.florida_coastline
+        ).postprocess_result(avoid_gdf, 200)
 
         # Reduce the polygons we plot by forming a bbox of the min & max lat and long
         gdfs = [gdf, asm_gdf, avoid_gdf]
@@ -344,6 +347,17 @@ class Privatiser:
             markersize=5,
             markerfacecolor="orange",
             label="Avoidant Sampling Method",
+        )
+        plt.plot(
+            postprocessed_avoid_gdf.geometry.x,
+            postprocessed_avoid_gdf.geometry.y,
+            linewidth=1,
+            linestyle="--",
+            color="indianred",
+            marker="o",
+            markersize=5,
+            markerfacecolor="indianred",
+            label="Postprocessed Avoidant Sampling Method",
         )
         self.florida_coastline.cx[min_lon:max_lon, min_lat:max_lat].plot(
             ax=plt.gca(), color="black", alpha=0.5
