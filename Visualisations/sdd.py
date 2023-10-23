@@ -14,6 +14,7 @@ class SampleDistanceDirection(SampleMethod):
     """
 
     COLOR = "purple"
+    NAME = "SDD"
 
     def _sample_angle(self, eps: float, theta: float) -> float:
         """
@@ -109,7 +110,7 @@ class SampleDistanceDirection(SampleMethod):
         return distribution.rvs()
 
     def privatise_trajectory(
-        self, gdf: gpd.GeoDataFrame, eps: float
+        self, gdf: gpd.GeoDataFrame, eps: float, delta: float
     ) -> gpd.GeoDataFrame:
         """
         Privatises the given trajectory using the SDD method.

@@ -6,70 +6,19 @@ from sample_method import SampleMethod
 from constants import WEB_MERCATOR
 
 
-class AdapatedSamplingMethod(SampleMethod):
+class PointwiseDistanceAngle(SampleMethod):
     """
-    Contains the Adapted Sampling Method sampling functions.
+    Contains the Pointwise Distance Angle sampling functions.
     """
 
     COLOR = "blue"
+    NAME = "PDA"
 
-    def _sample_angle(self, eps: float, theta: float) -> float:
+    def _sample_angle(self) -> float:
         """
-        Samples an angle theta according to the pdf given by
-        Pr(θ) = C*exp(ε*(2π - |α_i-θ|)/4π)
-        Here we have:
-        Δu = 2π, u(α, θ) = 2π - |α-θ| where θ, α ∈ [0, 2π]
-        1/C = 4π[2e^(ε/2)-e^(ε(2π-θ)/4π)-e^(εθ/4π)]/ε
-        which gives a pdf with area 1.
-
-        The utility function generates maximum utility when the angle
-        between the ship's projected angle to the next point and its
-        noisy estimate is 0.
+        Return an angle between [0, 2π] uniformly
         """
-        exp_factor = 4 * np.pi / eps
-
-        def inverse_cdf(X: float, eps: float, theta: float) -> float:
-            # Constant from PDF
-            C = (
-                2 * np.exp(eps / 2)
-                - np.exp((2 * np.pi - theta) / exp_factor)
-                - np.exp(theta / exp_factor)
-            )
-
-            # This is the inverted piece for when angles are in the range [0, theta]
-            piecewise_A = (
-                theta
-                - 2 * np.pi
-                + np.log(C * X + np.exp((2 * np.pi - theta) / exp_factor)) * exp_factor
-            )
-
-            # This is the inverted piece for when angles are in the range [theta, 2pi]
-            piecewise_B = (
-                theta
-                + 2 * np.pi
-                - np.log(
-                    -C * X
-                    + 2 * np.exp(eps / 2)
-                    - np.exp((2 * np.pi - theta) / exp_factor)
-                )
-                * exp_factor
-            )
-
-            # Return the correct piecewise function depending on the resultant value of the inverse
-            if 0 <= piecewise_A < theta:
-                return piecewise_A
-            elif theta <= piecewise_B <= 2 * np.pi:
-                return piecewise_B
-            else:
-                raise ValueError(
-                    f"Invalid value for piecewise function: {piecewise_A} or {piecewise_B}"
-                )
-
-        # Utilise the inverse transform sampling method to sample from the distribution
-        X = np.random.uniform(0, 1)
-
-        # Use the inverse CDF to sample from the distribution
-        return inverse_cdf(X, eps, theta)
+        return np.random.uniform(0, 2 * np.pi)
 
     def _sample_distance(self, eps: float, r: float) -> float:
         """
@@ -94,12 +43,47 @@ class AdapatedSamplingMethod(SampleMethod):
         # Use the inverse CDF to sample from the distribution
         return inverse_cdf(X, eps, r)
 
+    def _preprocess_trajectory(
+        self, gdf: gpd.GeoDataFrame, delta: float
+    ) -> gpd.GeoDataFrame:
+        """
+        Preprocess the trajectory, removing points which are closer than 2/δ to each other.
+        """
+
+        # The first point is always included
+        preprocessed = {
+            "geometry": [gdf.geometry.iloc[0]],
+        }
+
+        for i in range(1, len(gdf)):
+            # The current (real) point and the last (privatised) point
+            current_point: Point = gdf.geometry.iloc[i]
+            last_point: Point = preprocessed["geometry"][-1]
+
+            # Get the distance and angle from the vector between the two points
+            v = np.array(
+                [
+                    current_point.x - last_point.x,
+                    current_point.y - last_point.y,
+                ]
+            )
+            distance = float(np.linalg.norm(v))
+
+            # If the distance is greater than 2/δ, add the point to the preprocessed trajectory
+            if distance >= 2 / delta:
+                preprocessed["geometry"].append(current_point)
+
+        return gpd.GeoDataFrame(preprocessed, geometry="geometry", crs=WEB_MERCATOR)
+
     def privatise_trajectory(
-        self, gdf: gpd.GeoDataFrame, eps: float
+        self, gdf: gpd.GeoDataFrame, eps: float, delta: float
     ) -> gpd.GeoDataFrame:
         """
         Privatises the trajectory of a ship using our developed method.
         """
+
+        # Preprocess the trajectory
+        gdf = self._preprocess_trajectory(gdf, delta)
 
         # Privatised route starts and ends at the same location as the real route
         privatised = {
@@ -119,11 +103,10 @@ class AdapatedSamplingMethod(SampleMethod):
                 ]
             )
             distance = float(np.linalg.norm(v))
-            angle = (np.arctan2(v[1], v[0]) + 2 * np.pi) % (2 * np.pi)
 
             # Sample a distance and angle from the given distributions
             sampled_distance = self._sample_distance(eps, distance)
-            sampled_angle = self._sample_angle(eps, angle)
+            sampled_angle = self._sample_angle()
             # print(
             #     f"Distance {distance} & angle {angle} -> Distance {sampled_distance} & angle {sampled_angle}"
             # )

@@ -17,6 +17,6 @@ class SampleMethod(ABC):
 
     @abstractmethod
     def privatise_trajectory(
-        self, gdf: gpd.GeoDataFrame, eps: float
+        self, gdf: gpd.GeoDataFrame, eps: float, delta: float
     ) -> gpd.GeoDataFrame:
         pass

@@ -129,7 +129,7 @@ class AvoidantSamplingMethod(SampleMethod):
         return inverse_cdf(X, eps, r)
 
     def privatise_trajectory(
-        self, gdf: gpd.GeoDataFrame, eps: float
+        self, gdf: gpd.GeoDataFrame, eps: float, delta: float
     ) -> gpd.GeoDataFrame:
         """
         Privatises the trajectory of a ship using our developed method.
