@@ -1,7 +1,7 @@
 import geopandas as gpd  # type: ignore
 from shapely.geometry import Point  # type: ignore
 import numpy as np
-
+from typing import Dict
 from sample_method import SampleMethod
 from constants import WEB_MERCATOR
 
@@ -86,14 +86,18 @@ class PointwiseDistanceAngle(SampleMethod):
         gdf = self._preprocess_trajectory(gdf, delta)
 
         # Privatised route starts and ends at the same location as the real route
-        privatised = {
-            "geometry": [gdf.geometry.iloc[0]],
+        privatised: Dict[str, Point] = {
+            "geometry": [],
         }
 
-        for i in range(1, len(gdf) - 1):
+        for i in range(1, len(gdf)):
             # The current (real) point and the last (privatised) point
             current_point: Point = gdf.geometry.iloc[i]
-            last_estimate: Point = privatised["geometry"][-1]
+            last_estimate: Point = (
+                privatised["geometry"][-1]
+                if privatised["geometry"]
+                else gdf.geometry.iloc[0]
+            )
 
             # Get the distance and angle from the vector between the two points
             v = np.array(
@@ -119,5 +123,4 @@ class PointwiseDistanceAngle(SampleMethod):
                 )
             )
 
-        privatised["geometry"].append(gdf.geometry.iloc[-1])
         return gpd.GeoDataFrame(privatised, geometry="geometry", crs=WEB_MERCATOR)
