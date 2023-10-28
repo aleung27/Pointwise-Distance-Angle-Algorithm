@@ -7,15 +7,16 @@ from typing import Dict, List
 import geopandas as gpd  # type: ignore
 import matplotlib.pyplot as plt  # type: ignore
 from shapely.geometry import Point  # type: ignore
-from matplotlib.ticker import StrMethodFormatter, NullFormatter  # type: ignore
+from matplotlib.ticker import StrMethodFormatter, NullFormatter, ScalarFormatter  # type: ignore
 
 from sample_method import SampleMethod
 from pointwise_distance_angle import PointwiseDistanceAngle
 from sdd import SampleDistanceDirection
 
-from avoidant_sampling_method import AvoidantSamplingMethod
-from constants import WEB_MERCATOR, WGS_84
+from dtw import dtw, DTW  # type: ignore
 from frechetdist import frdist  # type: ignore
+
+from constants import WEB_MERCATOR, WGS_84
 
 DATASET_PATH = os.path.join(Path(__file__).parent.parent, "AIS_2019_01_01.csv")
 FLORIDA_COASTLINE = "Shapefiles/florida_coastline.shp"
@@ -40,9 +41,14 @@ MODES = {
     "p": "Privatise",
     "pd": "Privatise, varying delta",
     "pe": "Privatise, varying epsilon",
+    "pp": "Privatise, preset",
     "e": "Error Comparison",
-    "r": "Region Testing Visualisation (Avoidant Sampling Method)",
 }
+
+
+class CustomScalarFormatter(ScalarFormatter):
+    def _set_format(self):
+        self.format = "%#.4g"
 
 
 class Privatiser:
@@ -52,24 +58,6 @@ class Privatiser:
     def __init__(self) -> None:
         self.gdf = self.load_initial_data()
         self.florida_coastline = self.load_florida_coastline()
-
-    @classmethod
-    def calculate_euclidean_error(
-        cls, gdf1: gpd.GeoDataFrame, gdf2: gpd.GeoDataFrame
-    ) -> float:
-        """
-        Calculates the Euclidean distance between two points
-        """
-        error = 0.0
-
-        for i in range(len(gdf1)):
-            point1 = gdf1.geometry.iloc[i]
-            point2 = gdf2.geometry.iloc[i]
-            error += float(
-                np.linalg.norm(np.array([point1.x - point2.x, point1.y - point2.y]))
-            )
-
-        return error
 
     def load_initial_data(self) -> gpd.GeoDataFrame:
         df = pd.read_csv(DATASET_PATH)
@@ -105,8 +93,8 @@ class Privatiser:
             self.command_privatise_varying_delta()
         elif mode == "pe":
             self.command_privatise_varying_epsilon()
-        elif mode == "r":
-            self.command_region_testing()
+        elif mode == "pp":
+            self.command_privatise_preset()
         elif mode == "e":
             self.command_error_plot()
         else:
@@ -208,72 +196,6 @@ class Privatiser:
         plt.gca().xaxis.set_minor_formatter(NullFormatter())
         plt.legend()
 
-        plt.show()
-
-    def command_region_testing(self):
-        """
-        Ask the user to supply a given web mercator point and a radius.
-        Perform a test for sampling angles for different values of epsilon
-        and plot the results on a graph.
-
-        Tested on: p = -9064783 3544363, d = 100
-        Try on -9050513 3481824, d = 1000
-        """
-        N = 1  # Number of samples to take for each epsilon value
-
-        p = input("Enter a space-separated xy coordinate pair: ").split(" ")
-        p = Point(float(p[0]), float(p[1]))
-        d = float(input("Enter a value for the radius to sample at: "))
-
-        sampler = AvoidantSamplingMethod(self.florida_coastline)
-        valid_regions, invalid_regions = sampler.find_restricted_regions(p, d)
-        gdfs = []  # Store the resultant points for each epsilon test
-
-        # For each epsilon value, sample N points and plot them
-        for eps in TESTING_EPSILONS:
-            points = []
-
-            for _ in range(N):
-                angle = sampler._sample_angle(eps, 0, valid_regions, invalid_regions)
-                points.append(Point(p.x + d * np.cos(angle), p.y + d * np.sin(angle)))
-
-            gdfs.append(gpd.GeoDataFrame(geometry=points, crs=WEB_MERCATOR))
-
-        # Plot the given results in one figure with 6 Axes
-        plt.cla()
-        plt.clf()
-        plt.close()
-
-        # 2 rows of 3 columns with shared axes
-        fig, axs = plt.subplots(2, 3, sharex=True, sharey=True, figsize=(10, 10))
-
-        for i in range(len(TESTING_EPSILONS)):
-            ax: plt.Axes = axs[i // 3, i % 3]  # Current axis to plot on
-
-            # Plot the points and circle onto the respective axis as well as the coastline
-            gdfs[i].plot(ax=ax, color="red", alpha=0.1)
-            ax.plot(p.x, p.y, marker="o", markersize=1, color="blue")
-            gpd.GeoDataFrame(geometry=[p.buffer(d).boundary], crs=WEB_MERCATOR).plot(
-                ax=ax, color="blue", alpha=0.5, linestyle="--"
-            )
-            self.florida_coastline.cx[
-                p.x - 2 * d : p.x + 2 * d, p.y - 2 * d : p.y + 2 * d
-            ].plot(ax=ax, color="black", alpha=0.5)
-
-            # Configure the axes labels
-            ax.set_title(f"ε = {TESTING_EPSILONS[i]}")
-            ax.set_xlabel("Lon (Mercator)")
-            ax.set_ylabel("Lat (Mercator)")
-
-        for ax in axs.flat:
-            ax.label_outer()
-
-        # Configure the figure and layout of the subplots
-        fig.suptitle(
-            f"Obstacle Avoidance Sampling Method for Differing Values of Epsilon (N = {N})"
-        )
-        fig.tight_layout()
-        plt.subplots_adjust(wspace=0)
         plt.show()
 
     def command_privatise_varying_delta(self):
@@ -545,10 +467,10 @@ class Privatiser:
         # Reduce the polygons we plot by forming a bbox of the min & max lat and long
         gdfs = [gdf, sdd_gdf, pda_gdf]
         min_lon, min_lat, max_lon, max_lat = (
-            np.min([df.geometry.x.min() for df in gdfs]),
-            np.min([df.geometry.y.min() for df in gdfs]),
-            np.max([df.geometry.x.max() for df in gdfs]),
-            np.max([df.geometry.y.max() for df in gdfs]),
+            np.nanmin([df.geometry.x.min() for df in gdfs]),
+            np.nanmin([df.geometry.y.min() for df in gdfs]),
+            np.nanmax([df.geometry.x.max() for df in gdfs]),
+            np.nanmax([df.geometry.y.max() for df in gdfs]),
         )
 
         # Clear the plot
@@ -630,6 +552,179 @@ class Privatiser:
         plt.ticklabel_format(useOffset=False)
         plt.gca().set_facecolor("azure")
         plt.legend()
+        plt.show()
+
+    def command_privatise_preset(self):
+        """
+        Display a plot of the given ship's trajectory for 4
+        different pre-selected MMSIs
+
+        - Short trajectory in open water (258288000)
+        - Long trajectory in open water (316038559)
+        - Short trajectory in a river (near landmasses) (367637340)
+        - Long trajectory in a river (near landmasses) (368011140)
+        """
+
+        def on_pick(event):
+            """
+            Toggle the visibility of the line and corresponding
+            entries in the legend of the plot
+            """
+            legend_line = event.artist
+            original_lines, legend_text = legend_map[legend_line]
+            visible = not original_lines[0].get_visible()
+
+            for line in original_lines:
+                line.set_visible(visible)
+
+            legend_line.set_alpha(1.0 if visible else 0)
+            legend_text.set_alpha(1.0 if visible else 0)
+
+            fig.canvas.draw()
+
+        MMSIS = [
+            258288000,
+            316038559,
+            367637340,
+            368011140,
+        ]
+
+        # Get inputs for epsilon and delta
+        epsilon = float(input("Enter a value for epsilon (ε): "))
+        delta = float(input("Enter a value for delta (δ): "))
+
+        # Create a 2x2 grid of plots
+        plt.cla()
+        plt.clf()
+        plt.close()
+        fig, axs = plt.subplots(2, 2, figsize=(12, 10))
+
+        lines = {
+            "real": [],
+            "sdd": [],
+            "postprocessed_pda": [],
+            "pda": [],
+        }
+
+        for i, mmsi in enumerate(MMSIS):
+            gdf = self.gdf.loc[self.gdf["MMSI"] == mmsi]  # Filter by current MMSI
+            pda = PointwiseDistanceAngle(self.florida_coastline)
+
+            # Run the privatisation against all schemes
+            sdd_gdf = SampleDistanceDirection().privatise_trajectory(
+                gdf, eps=epsilon, delta=0.0
+            )
+            pda_gdf = pda.privatise_trajectory(gdf, eps=epsilon, delta=delta)
+            pda_gdf_postprocessing = pda.postprocess_result(pda_gdf, 200)
+
+            # Reduce the polygons we plot by forming a bbox of the min & max lat and long
+            gdfs = [gdf, sdd_gdf, pda_gdf]
+            min_lon, min_lat, max_lon, max_lat = (
+                np.min([df.geometry.x.min() for df in gdfs]),
+                np.min([df.geometry.y.min() for df in gdfs]),
+                np.max([df.geometry.x.max() for df in gdfs]),
+                np.max([df.geometry.y.max() for df in gdfs]),
+            )
+
+            # Current axis to plot on
+            ax: plt.Axes = axs[i // 2, i % 2]
+
+            # Plot each of the trajectories
+            lines["real"].append(
+                ax.plot(
+                    gdf.geometry.x,
+                    gdf.geometry.y,
+                    linewidth=1,
+                    linestyle="--",
+                    color="green",
+                    marker="o",
+                    markersize=5,
+                    markerfacecolor="green",
+                    label="Original",
+                )[0]
+            )
+            lines["sdd"].append(
+                ax.plot(
+                    sdd_gdf.geometry.x,
+                    sdd_gdf.geometry.y,
+                    linewidth=1,
+                    linestyle="--",
+                    color="purple",
+                    marker="^",
+                    markersize=5,
+                    markerfacecolor="purple",
+                    label="SDD",
+                )[0]
+            )
+            lines["postprocessed_pda"].append(
+                ax.plot(
+                    pda_gdf_postprocessing.geometry.x,
+                    pda_gdf_postprocessing.geometry.y,
+                    linewidth=1,
+                    linestyle="--",
+                    color="indianred",
+                    marker="P",
+                    markersize=5,
+                    markerfacecolor="indianred",
+                    label="Postprocessed",
+                )[0]
+            )
+            lines["pda"].append(
+                ax.plot(
+                    pda_gdf.geometry.x,
+                    pda_gdf.geometry.y,
+                    linewidth=1,
+                    linestyle="--",
+                    color="blue",
+                    marker="s",
+                    markersize=5,
+                    markerfacecolor="blue",
+                    label="PDA",
+                )[0]
+            )
+
+            # Plot the coastline if applicable
+            self.florida_coastline.cx[min_lon:max_lon, min_lat:max_lat].plot(
+                ax=ax, color="black", alpha=0.5
+            )
+
+            # Configure the axes labels
+            ax.set_title(f"Ship {mmsi}", y=0.9)
+            ax.set_xlabel("Longitude (EPSG:3857)")
+            ax.set_ylabel("Latitude (EPSG:3857)")
+            ax.set_facecolor("azure")
+            ax.axis("square")
+
+            # Format the axes to be 4 sig figs with sci notation
+            ax.xaxis.set_major_formatter(CustomScalarFormatter(useMathText=True))
+            ax.yaxis.set_major_formatter(CustomScalarFormatter(useMathText=True))
+
+            # Annotate the start and end points of the trajectory
+            ax.annotate("Start", (gdf.geometry.iloc[0].x, gdf.geometry.iloc[0].y))
+            ax.annotate("End", (gdf.geometry.iloc[-1].x, gdf.geometry.iloc[-1].y))
+
+        # Configure the figure and layout of the subplots
+        fig.suptitle(f"Privatisation of Ship Trajectories (ε: {epsilon}, δ: {delta})")
+        legend = fig.legend(
+            handles=axs[0, 0].get_legend_handles_labels()[0],
+            labels=axs[0, 0].get_legend_handles_labels()[1],
+            loc="center left",
+            bbox_to_anchor=(0.85, 0.5),
+        )
+        plt.xticks(plt.xticks()[0][0::2])
+        plt.yticks(plt.yticks()[0][0::2])
+        fig.tight_layout()
+        plt.subplots_adjust(wspace=0, right=0.85)
+
+        # Make each entry of the legend clickable, toggling the display of the corresponding plot
+        legend_map = {}
+        for legend_line, legend_text, original_lines in zip(
+            legend.get_lines(), legend.get_texts(), lines.values()
+        ):
+            legend_line.set_picker(5)
+            legend_map[legend_line] = (original_lines, legend_text)
+
+        plt.connect("pick_event", on_pick)
         plt.show()
 
 
