@@ -1,7 +1,11 @@
 import geopandas as gpd  # type: ignore
-from shapely.geometry import Point  # type: ignore
+from shapely.geometry import Point, LineString  # type: ignore
 import numpy as np
-from typing import Dict
+from math import inf
+from shapely.ops import nearest_points  # type: ignore
+from shapely import offset_curve  # type: ignore
+
+from typing import Dict, List
 from sample_method import SampleMethod
 from constants import WEB_MERCATOR
 
@@ -13,6 +17,10 @@ class PointwiseDistanceAngle(SampleMethod):
 
     COLOR = "blue"
     NAME = "PDA"
+    boundaries: gpd.GeoDataFrame  # This is the loaded shape of the coastline
+
+    def __init__(self, boundaries: gpd.GeoDataFrame):
+        self.boundaries = boundaries
 
     def _sample_angle(self) -> float:
         """
@@ -75,6 +83,28 @@ class PointwiseDistanceAngle(SampleMethod):
 
         return gpd.GeoDataFrame(preprocessed, geometry="geometry", crs=WEB_MERCATOR)
 
+    def _raycast_intersection(self, linestring: LineString) -> bool:
+        """
+        Checks if the given linestring intersects with the coastline.
+
+        Returns True if the linestring intersects an even number of times with the coastline.
+        """
+
+        line_gdf = gpd.GeoDataFrame(geometry=[linestring], crs=WEB_MERCATOR)
+        intersection = line_gdf.overlay(
+            self.boundaries, how="intersection", keep_geom_type=False
+        )
+
+        # You get 0 or more geometries that are either a Point or MultiPoint
+        intersection_pts = 0
+        for geometry in intersection.geometry:
+            if geometry.geom_type == "Point":
+                intersection_pts += 1
+            else:
+                intersection_pts += len(geometry.geoms)
+
+        return intersection_pts % 2 == 0
+
     def privatise_trajectory(
         self, gdf: gpd.GeoDataFrame, eps: float, delta: float
     ) -> gpd.GeoDataFrame:
@@ -86,8 +116,9 @@ class PointwiseDistanceAngle(SampleMethod):
         gdf = self._preprocess_trajectory(gdf, delta)
 
         # Privatised route starts and ends at the same location as the real route
-        privatised: Dict[str, Point] = {
+        privatised: Dict[str, List[Point | bool]] = {
             "geometry": [],
+            "valid": [],
         }
 
         for i in range(1, len(gdf)):
@@ -116,11 +147,54 @@ class PointwiseDistanceAngle(SampleMethod):
             # )
 
             # Calculate the new point at angle sampled_angle in a circle of radius sampled_distance
-            privatised["geometry"].append(
-                Point(
-                    current_point.x + sampled_distance * np.cos(sampled_angle),
-                    current_point.y + sampled_distance * np.sin(sampled_angle),
-                )
+            new_point = Point(
+                current_point.x + sampled_distance * np.cos(sampled_angle),
+                current_point.y + sampled_distance * np.sin(sampled_angle),
             )
+            valid = self._raycast_intersection(LineString([current_point, new_point]))
+            privatised["geometry"].append(new_point)
+            privatised["valid"].append(valid)
 
         return gpd.GeoDataFrame(privatised, geometry="geometry", crs=WEB_MERCATOR)
+
+    def postprocess_result(
+        self, trajectory: gpd.GeoDataFrame, buffer: float = 0
+    ) -> gpd.GeoDataFrame:
+        trajectory = trajectory.copy()
+
+        for i in range(len(trajectory)):
+            if not trajectory.valid.iloc[i]:
+                # If the point is invalid, find the closest valid point
+                # on the boundary from the privatised point and replace it
+                pt = trajectory.geometry.iloc[i]
+                closest_pt: Point = None
+                closest_distance = inf
+
+                # For each line in the boundary, find the closest point
+                for line in self.boundaries.geometry:
+                    try:
+                        nearest_pt = nearest_points(line, pt)[0]
+                        dist = nearest_pt.distance(pt)
+
+                        if dist < closest_distance:
+                            closest_pt = nearest_pt
+                            closest_distance = dist
+                    except ValueError:
+                        # Skip empty geometries
+                        pass
+
+                # Calculate the replacement point by adding buffer distance to the vector from the original point to the closest point
+                print(f"Replacing {pt} with {closest_pt} + {buffer}")
+                v = np.array(
+                    [
+                        closest_pt.x - pt.x,
+                        closest_pt.y - pt.y,
+                    ]
+                )
+                new_pt = Point(
+                    closest_pt.x + buffer * v[0] / np.linalg.norm(v),
+                    closest_pt.y + buffer * v[1] / np.linalg.norm(v),
+                )
+                trajectory.geometry.iloc[i] = new_pt
+
+        return trajectory.drop(columns=["valid"])
