@@ -44,6 +44,8 @@ MODES = {
     "pp": "Privatise, preset",
     "e": "Error Comparison",
     "ep": "Error Comparison, preset",
+    "ee": "Error Comparison, varying epsilon",
+    "ed": "Error Comparison, varying delta",
 }
 
 PRESET_MMSIS = [
@@ -52,7 +54,9 @@ PRESET_MMSIS = [
     367637340,
     368011140,
 ]
-TEST_ITERATIONS = 5
+PRESET_EPSILONS = [0.1, 0.5, 1, 2, 5, 10]
+PRESET_DELTAS = [0.001, 0.005, 0.01, 0.05, 0.1, 0.2]
+TEST_ITERATIONS = 100
 
 
 class CustomScalarFormatter(ScalarFormatter):
@@ -105,13 +109,15 @@ class Privatiser:
         elif mode == "pp":
             self.command_privatise_preset()
         elif mode == "e":
-            self.command_error_plot()
-        elif mode == "ep":
             self.command_error_preset()
+        elif mode == "ee":
+            self.command_error_varying_epsilon()
+        elif mode == "ed":
+            self.command_error_varying_delta()
         else:
             print("Invalid command")
 
-    def command_error_plot(self):
+    def command_error_varying_epsilon(self):
         """
         Generates the mean and max errors for each of the given methods
         for different values of epsilon.
@@ -119,62 +125,65 @@ class Privatiser:
         Results are plotted on a graph.
         """
 
-        N = 100  # Number of iterations to run for each epsilon value
-        TESTING_EPSILONS = [0.01, 0.1, 1, 2, 5, 10]
-
         methods: List[SampleMethod] = [
             SampleDistanceDirection(),
-            PointwiseDistanceAngle(),
+            PointwiseDistanceAngle(self.florida_coastline),
         ]
 
         # Filter the data to only include the given ship
         ship_id = int(input("Enter a ship ID (MMSI): "))
+        delta = float(input("Enter a value for delta (δ): "))
+
         gdf = self.gdf.loc[self.gdf["MMSI"] == ship_id]
-        A = [[gdf.geometry.iloc[i].x, gdf.geometry.iloc[i].y] for i in range(len(gdf))]
+        gdf_pts = [(pt.x, pt.y) for pt in gdf.geometry.values]
 
         # Clear the plot
         plt.cla()
         plt.clf()
         plt.close()
+        fig, axs = plt.subplots(1, 2, figsize=(14, 10))
+        dtw_ax: plt.Axes = axs[0]
+        dfd_ax: plt.Axes = axs[1]
 
         # For each method, run through each test value of epsilon N times
         for m in methods:
-            res: Dict[str, List[float]] = {"eps": [], "mean": [], "max": [], "min": []}
+            res: Dict[str, List[float]] = {"eps": [], "dtw": [], "dfd": []}
 
-            for eps in TESTING_EPSILONS:
-                total_error = 0.0
-                max_error = 0.0
-                min_error = float("inf")
+            for eps in PRESET_EPSILONS:
+                dtw_min, dtw_max, dtw_avg = inf, -inf, 0.0
+                dfd_min, dfd_max, dfd_avg = inf, -inf, 0.0
 
-                for _ in range(N):
-                    privatised_df = m.privatise_trajectory(gdf, eps, 0.1)
-                    B = [
-                        [
-                            privatised_df.geometry.iloc[i].x,
-                            privatised_df.geometry.iloc[i].y,
-                        ]
-                        for i in range(len(privatised_df))
+                for _ in range(TEST_ITERATIONS):
+                    privatised_df = m.privatise_trajectory(gdf, eps, delta)
+                    privatised_pts = [
+                        (pt.x, pt.y) for pt in privatised_df.geometry.values
                     ]
-                    error = frechet_dist(A, B)
 
-                    total_error += error
-                    max_error = max(max_error, error)
-                    min_error = min(min_error, error)
+                    dfd_error = frechet_dist(privatised_pts, gdf_pts)
+                    dtw_error = dtw(privatised_pts, gdf_pts).normalizedDistance
 
-                mean_error = total_error / N
+                    dtw_min = min(dtw_min, dtw_error)
+                    dtw_max = max(dtw_max, dtw_error)
+                    dtw_avg += dtw_error
+
+                    dfd_min = min(dfd_min, dfd_error)
+                    dfd_max = max(dfd_max, dfd_error)
+                    dfd_avg += dfd_error
+
+                dtw_avg /= TEST_ITERATIONS
+                dfd_avg /= TEST_ITERATIONS
 
                 res["eps"].append(eps)
-                res["mean"].append(mean_error)
-                res["max"].append(max_error)
-                res["min"].append(min_error)
+                res["dfd"].append((dfd_avg, dfd_min, dfd_max))
+                res["dtw"].append((dtw_avg, dtw_min, dtw_max))
 
             # Plot the results for the given method
-            plt.errorbar(
+            dtw_ax.errorbar(
                 res["eps"],
-                res["mean"],
+                [y[0] for y in res["dtw"]],
                 yerr=(
-                    np.subtract(res["mean"], res["min"]),
-                    np.subtract(res["max"], res["mean"]),
+                    np.subtract([y[0] for y in res["dtw"]], [y[1] for y in res["dtw"]]),
+                    np.subtract([y[2] for y in res["dtw"]], [y[0] for y in res["dtw"]]),
                 ),
                 label=f"{m.NAME} Mean Error",
                 linewidth=1,
@@ -186,167 +195,327 @@ class Privatiser:
                 capsize=5,
                 elinewidth=0.75,
             )
-            # Fill the area between the max and minimum error with the same colour but at a lower opacity level
-            # plt.fill_between(
-            #     res["eps"],
-            #     res["min"],
-            #     res["max"],
-            #     color=m.COLOR,
-            #     alpha=0.1,
-            #     label=f"{m.NAME} Error Range",
-            # )
+            dfd_ax.errorbar(
+                res["eps"],
+                [y[0] for y in res["dfd"]],
+                yerr=(
+                    np.subtract([y[0] for y in res["dfd"]], [y[1] for y in res["dfd"]]),
+                    np.subtract([y[2] for y in res["dfd"]], [y[0] for y in res["dfd"]]),
+                ),
+                label=f"{m.NAME} Mean Error",
+                linewidth=1,
+                linestyle="-",
+                color=m.COLOR,
+                marker="*",
+                markersize=8,
+                markerfacecolor=m.COLOR,
+                capsize=5,
+                elinewidth=0.75,
+            )
 
-        # Configure the axes labels and the title of the plot
-        plt.xlabel("Epsilon (ε)")
-        plt.ylabel("Error (m)")
-        plt.title(
-            f"Discrete Frechet Distance for Ship {ship_id} Under Privatisation Methods (N = {N})"
+        # Configure the axes labels
+        dtw_ax.set_title(f"Normalised Dynamic Time Warping Error", y=0.9)
+        dtw_ax.set_xlabel("Epsilon (ε)")
+        dtw_ax.set_ylabel("Error (m)")
+        dtw_ax.set_xscale("log")
+        dtw_ax.set_xticks(PRESET_EPSILONS)
+        dtw_ax.xaxis.set_major_formatter(StrMethodFormatter("{x:.3g}"))
+
+        dfd_ax.set_title(f"Discrete Fréchet Distance Error", y=0.9)
+        dfd_ax.set_xlabel("Epsilon (ε)")
+        dfd_ax.set_ylabel("Error (m)")
+        dfd_ax.set_xscale("log")
+        dfd_ax.set_xticks(PRESET_EPSILONS)
+        dfd_ax.xaxis.set_major_formatter(StrMethodFormatter("{x:.3g}"))
+
+        # Configure the figure and layout of the subplots
+        fig.suptitle(
+            f"Trajectory Error Calculations for Varying Epsilon (N: {TEST_ITERATIONS}, δ: {delta})"
         )
-        plt.xscale("log")
-        plt.gca().xaxis.set_major_formatter(StrMethodFormatter("{x:.3g}"))
-        plt.gca().xaxis.set_minor_formatter(NullFormatter())
-        plt.legend()
+        fig.legend(
+            handles=dtw_ax.get_legend_handles_labels()[0],
+            labels=dtw_ax.get_legend_handles_labels()[1],
+            loc="center left",
+            bbox_to_anchor=(0.85, 0.5),
+        )
+        plt.subplots_adjust(wspace=0.2, right=0.85)
 
         plt.show()
 
-    def command_privatise_varying_delta(self):
+    def command_error_varying_delta(self):
         """
-        Privatise a given ship's trajectory with varying delta
+        Generates the mean and max errors for each of the given methods
+        for different values of delta.
+
+        Results are plotted on a graph.
         """
 
-        DELTAS = [0.001, 0.005, 0.01, 0.05, 0.1, 0.2]
+        methods: List[SampleMethod] = [
+            # SampleDistanceDirection(),
+            PointwiseDistanceAngle(self.florida_coastline),
+        ]
 
         # Filter the data to only include the given ship
         ship_id = int(input("Enter a ship ID (MMSI): "))
         epsilon = float(input("Enter a value for epsilon (ε): "))
 
         gdf = self.gdf.loc[self.gdf["MMSI"] == ship_id]
-
-        # Run the privitisation against the 3 current schemes available
-        sdd_gdf = SampleDistanceDirection().privatise_trajectory(
-            gdf, eps=epsilon, delta=0.0
-        )
-        pda_gdfs = [
-            PointwiseDistanceAngle().privatise_trajectory(gdf, eps=epsilon, delta=delta)
-            for delta in DELTAS
-        ]
-
-        # Reduce the polygons we plot by forming a bbox of the min & max lat and long
-        gdfs = [gdf, sdd_gdf, *pda_gdfs]
-        min_lon, min_lat, max_lon, max_lat = (
-            np.min([df.geometry.x.min() for df in gdfs]),
-            np.min([df.geometry.y.min() for df in gdfs]),
-            np.max([df.geometry.x.max() for df in gdfs]),
-            np.max([df.geometry.y.max() for df in gdfs]),
-        )
+        gdf_pts = [(pt.x, pt.y) for pt in gdf.geometry.values]
 
         # Clear the plot
         plt.cla()
         plt.clf()
         plt.close()
+        fig, axs = plt.subplots(1, 2, figsize=(14, 10))
+        dtw_ax: plt.Axes = axs[0]
+        dfd_ax: plt.Axes = axs[1]
 
-        # 2 rows of 3 columns with shared axes
-        fig, axs = plt.subplots(2, 3, sharex=True, sharey=True, figsize=(10, 10))
+        # For each method, run through each test value of epsilon N times
+        for m in methods:
+            res: Dict[str, List[float]] = {"delta": [], "dtw": [], "dfd": []}
 
-        for i in range(len(DELTAS)):
-            ax: plt.Axes = axs[i // 3, i % 3]  # Current axis to plot on
+            for delta in PRESET_DELTAS:
+                dtw_min, dtw_max, dtw_avg = inf, -inf, 0.0
+                dfd_min, dfd_max, dfd_avg = inf, -inf, 0.0
 
-            # Plot the trajectories
-            ax.plot(
-                gdf.geometry.x,
-                gdf.geometry.y,
+                for _ in range(TEST_ITERATIONS):
+                    privatised_df = m.privatise_trajectory(gdf, epsilon, delta)
+                    privatised_pts = [
+                        (pt.x, pt.y) for pt in privatised_df.geometry.values
+                    ]
+
+                    dfd_error = frechet_dist(privatised_pts, gdf_pts)
+                    dtw_error = dtw(privatised_pts, gdf_pts).normalizedDistance
+
+                    dtw_min = min(dtw_min, dtw_error)
+                    dtw_max = max(dtw_max, dtw_error)
+                    dtw_avg += dtw_error
+
+                    dfd_min = min(dfd_min, dfd_error)
+                    dfd_max = max(dfd_max, dfd_error)
+                    dfd_avg += dfd_error
+
+                dtw_avg /= TEST_ITERATIONS
+                dfd_avg /= TEST_ITERATIONS
+
+                res["delta"].append(delta)
+                res["dfd"].append((dfd_avg, dfd_min, dfd_max))
+                res["dtw"].append((dtw_avg, dtw_min, dtw_max))
+
+            # Plot the results for the given method
+            dtw_ax.errorbar(
+                res["delta"],
+                [y[0] for y in res["dtw"]],
+                yerr=(
+                    np.subtract([y[0] for y in res["dtw"]], [y[1] for y in res["dtw"]]),
+                    np.subtract([y[2] for y in res["dtw"]], [y[0] for y in res["dtw"]]),
+                ),
+                label=f"{m.NAME} Mean Error",
                 linewidth=1,
-                linestyle="--",
-                color="green",
-                marker="o",
-                markersize=5,
-                markerfacecolor="green",
-                label="Real Trajectory",
+                linestyle="-",
+                color=m.COLOR,
+                marker="*",
+                markersize=8,
+                markerfacecolor=m.COLOR,
+                capsize=5,
+                elinewidth=0.75,
             )
-            ax.plot(
-                sdd_gdf.geometry.x,
-                sdd_gdf.geometry.y,
+            dfd_ax.errorbar(
+                res["delta"],
+                [y[0] for y in res["dfd"]],
+                yerr=(
+                    np.subtract([y[0] for y in res["dfd"]], [y[1] for y in res["dfd"]]),
+                    np.subtract([y[2] for y in res["dfd"]], [y[0] for y in res["dfd"]]),
+                ),
+                label=f"{m.NAME} Mean Error",
                 linewidth=1,
-                linestyle="--",
-                color="purple",
-                marker="^",
-                markersize=5,
-                markerfacecolor="purple",
-                label="SDD Trajectory",
-            )
-            ax.plot(
-                pda_gdfs[i].geometry.x,
-                pda_gdfs[i].geometry.y,
-                linewidth=1,
-                linestyle="--",
-                color="blue",
-                marker="s",
-                markersize=5,
-                markerfacecolor="blue",
-                label="PDA Trajectory",
+                linestyle="-",
+                color=m.COLOR,
+                marker="*",
+                markersize=8,
+                markerfacecolor=m.COLOR,
+                capsize=5,
+                elinewidth=0.75,
             )
 
-            # Plot the coastline if applicable
-            self.florida_coastline.cx[min_lon:max_lon, min_lat:max_lat].plot(
-                ax=ax, color="black", alpha=0.5
-            )
+        # Configure the axes labels
+        dtw_ax.set_title(f"Normalised Dynamic Time Warping Error", y=0.9)
+        dtw_ax.set_xlabel("Delta (δ)")
+        dtw_ax.set_ylabel("Error (m)")
+        dtw_ax.set_xscale("log")
+        dtw_ax.set_xticks(PRESET_DELTAS)
+        dtw_ax.xaxis.set_major_formatter(StrMethodFormatter("{x:.3g}"))
 
-            # Configure the axes labels
-            ax.set_title(f"δ={DELTAS[i]}", y=0.9)
-            ax.set_xlabel("Lon (Mercator)")
-            ax.set_ylabel("Lat (Mercator)")
-            ax.set_facecolor("azure")
-
-            # Annotate the start and end points of the trajectory
-            ax.annotate("Start", (gdf.geometry.iloc[0].x, gdf.geometry.iloc[0].y))
-            ax.annotate("End", (gdf.geometry.iloc[-1].x, gdf.geometry.iloc[-1].y))
-
-        for ax in axs.flat:
-            ax.label_outer()
+        dfd_ax.set_title(f"Discrete Fréchet Distance Error", y=0.9)
+        dfd_ax.set_xlabel("Delta (δ)")
+        dfd_ax.set_ylabel("Error (m)")
+        dfd_ax.set_xscale("log")
+        dfd_ax.set_xticks(PRESET_DELTAS)
+        dfd_ax.xaxis.set_major_formatter(StrMethodFormatter("{x:.3g}"))
 
         # Configure the figure and layout of the subplots
         fig.suptitle(
-            f"Privatisation of Ship {ship_id} Against Varying δ (ε: {epsilon})"
+            f"Trajectory Error Calculations for Ship {ship_id} Varying Delta (N: {TEST_ITERATIONS}, ε: {epsilon})"
         )
         fig.legend(
-            handles=axs[0, 0].get_legend_handles_labels()[0],
-            labels=axs[0, 0].get_legend_handles_labels()[1],
+            handles=dtw_ax.get_legend_handles_labels()[0],
+            labels=dtw_ax.get_legend_handles_labels()[1],
             loc="center left",
             bbox_to_anchor=(0.85, 0.5),
         )
-        plt.axis("square")
-        plt.xticks(plt.xticks()[0][0::2])
-        plt.yticks(plt.yticks()[0][0::2])
-        plt.ticklabel_format(useOffset=False)
-        fig.tight_layout()
-        plt.subplots_adjust(wspace=0, right=0.85)
+        plt.subplots_adjust(wspace=0.2, right=0.85)
+
+        plt.show()
+
+    def command_privatise_varying_delta(self):
+        """
+        Generates the mean and max errors for each of the given methods
+        for different values of epsilon.
+
+        Results are plotted on a graph.
+        """
+
+        methods: List[SampleMethod] = [
+            SampleDistanceDirection(),
+            PointwiseDistanceAngle(self.florida_coastline),
+        ]
+
+        # Filter the data to only include the given ship
+        ship_id = int(input("Enter a ship ID (MMSI): "))
+        delta = float(input("Enter a value for delta (δ): "))
+
+        gdf = self.gdf.loc[self.gdf["MMSI"] == ship_id]
+        gdf_pts = [(pt.x, pt.y) for pt in gdf.geometry.values]
+
+        # Clear the plot
+        plt.cla()
+        plt.clf()
+        plt.close()
+        fig, axs = plt.subplots(1, 2, figsize=(14, 10))
+        dtw_ax: plt.Axes = axs[0]
+        dfd_ax: plt.Axes = axs[1]
+
+        # For each method, run through each test value of epsilon N times
+        for m in methods:
+            res: Dict[str, List[float]] = {"eps": [], "dtw": [], "dfd": []}
+
+            for eps in PRESET_EPSILONS:
+                dtw_min, dtw_max, dtw_avg = inf, -inf, 0.0
+                dfd_min, dfd_max, dfd_avg = inf, -inf, 0.0
+
+                for _ in range(TEST_ITERATIONS):
+                    privatised_df = m.privatise_trajectory(gdf, eps, delta)
+                    privatised_pts = [
+                        (pt.x, pt.y) for pt in privatised_df.geometry.values
+                    ]
+
+                    dfd_error = frechet_dist(gdf_pts, privatised_pts)
+                    dtw_error = dtw(gdf_pts, privatised_pts).normalizedDistance
+
+                    dtw_min = min(dtw_min, dtw_error)
+                    dtw_max = max(dtw_max, dtw_error)
+                    dtw_avg += dtw_error
+
+                    dfd_min = min(dfd_min, dfd_error)
+                    dfd_max = max(dfd_max, dfd_error)
+                    dfd_avg += dfd_error
+
+                dtw_avg /= TEST_ITERATIONS
+                dfd_avg /= TEST_ITERATIONS
+
+                res["eps"].append(eps)
+                res["dfd"].append((dfd_avg, dfd_min, dfd_max))
+                res["dtw"].append((dtw_avg, dtw_min, dtw_max))
+
+            # Plot the results for the given method
+            dtw_ax.errorbar(
+                res["eps"],
+                [y[0] for y in res["dtw"]],
+                yerr=(
+                    np.subtract([y[0] for y in res["dtw"]], [y[1] for y in res["dtw"]]),
+                    np.subtract([y[2] for y in res["dtw"]], [y[0] for y in res["dtw"]]),
+                ),
+                label=f"{m.NAME} Mean Error",
+                linewidth=1,
+                linestyle="-",
+                color=m.COLOR,
+                marker="*",
+                markersize=8,
+                markerfacecolor=m.COLOR,
+                capsize=5,
+                elinewidth=0.75,
+            )
+            dfd_ax.errorbar(
+                res["eps"],
+                [y[0] for y in res["dfd"]],
+                yerr=(
+                    np.subtract([y[0] for y in res["dfd"]], [y[1] for y in res["dfd"]]),
+                    np.subtract([y[2] for y in res["dfd"]], [y[0] for y in res["dfd"]]),
+                ),
+                label=f"{m.NAME} Mean Error",
+                linewidth=1,
+                linestyle="-",
+                color=m.COLOR,
+                marker="*",
+                markersize=8,
+                markerfacecolor=m.COLOR,
+                capsize=5,
+                elinewidth=0.75,
+            )
+
+        # Configure the axes labels
+        dtw_ax.set_title(f"Normalised Dynamic Time Warping Error", y=0.9)
+        dtw_ax.set_xlabel("Epsilon (ε)")
+        dtw_ax.set_ylabel("Error (m)")
+        dtw_ax.set_xscale("log")
+        dtw_ax.set_xticks(PRESET_EPSILONS)
+        dtw_ax.xaxis.set_major_formatter(StrMethodFormatter("{x:.3g}"))
+
+        dfd_ax.set_title(f"Discrete Fréchet Distance Error", y=0.9)
+        dfd_ax.set_xlabel("Epsilon (ε)")
+        dfd_ax.set_ylabel("Error (m)")
+        dfd_ax.set_xscale("log")
+        dfd_ax.set_xticks(PRESET_EPSILONS)
+        dfd_ax.xaxis.set_major_formatter(StrMethodFormatter("{x:.3g}"))
+
+        # Configure the figure and layout of the subplots
+        fig.suptitle(
+            f"Trajectory Error Calculations for Varying Epsilon (N: {TEST_ITERATIONS}, δ: {delta})"
+        )
+        fig.legend(
+            handles=dtw_ax.get_legend_handles_labels()[0],
+            labels=dtw_ax.get_legend_handles_labels()[1],
+            loc="center left",
+            bbox_to_anchor=(0.85, 0.5),
+        )
+        plt.subplots_adjust(wspace=0.2, right=0.85)
+
         plt.show()
 
     def command_privatise_varying_epsilon(self):
         """
         Privatise a given ship's trajectory with varying epsilon
         """
-
-        EPSILONS = [0.1, 0.5, 1, 2, 5, 10]
-        delta = 0.1
-
         # Filter the data to only include the given ship
         ship_id = int(input("Enter a ship ID (MMSI): "))
+        delta = float(input("Enter a value for delta (δ): "))
 
         gdf = self.gdf.loc[self.gdf["MMSI"] == ship_id]
+        pda = PointwiseDistanceAngle(self.florida_coastline)
 
         # Run the privitisation against the 3 current schemes available
         sdd_gdfs = [
             SampleDistanceDirection().privatise_trajectory(gdf, eps=epsilon, delta=0.0)
-            for epsilon in EPSILONS
+            for epsilon in PRESET_EPSILONS
         ]
         pda_gdfs = [
-            PointwiseDistanceAngle().privatise_trajectory(gdf, eps=epsilon, delta=delta)
-            for epsilon in EPSILONS
+            pda.privatise_trajectory(gdf, eps=epsilon, delta=delta)
+            for epsilon in PRESET_EPSILONS
         ]
 
         # Reduce the polygons we plot by forming a bbox of the min & max lat and long
         gdfs = [gdf, *sdd_gdfs, *pda_gdfs]
+        # gdfs = [gdf, *pda_gdfs]
         min_lon, min_lat, max_lon, max_lat = (
             np.min([df.geometry.x.min() for df in gdfs]),
             np.min([df.geometry.y.min() for df in gdfs]),
@@ -362,7 +531,7 @@ class Privatiser:
         # 2 rows of 3 columns with shared axes
         fig, axs = plt.subplots(2, 3, sharex=True, sharey=True, figsize=(10, 10))
 
-        for i in range(len(EPSILONS)):
+        for i in range(len(PRESET_EPSILONS)):
             ax: plt.Axes = axs[i // 3, i % 3]  # Current axis to plot on
 
             # Plot the trajectories
@@ -375,7 +544,7 @@ class Privatiser:
                 marker="o",
                 markersize=5,
                 markerfacecolor="green",
-                label="Real Trajectory",
+                label="Original",
             )
             ax.plot(
                 sdd_gdfs[i].geometry.x,
@@ -386,7 +555,7 @@ class Privatiser:
                 marker="^",
                 markersize=5,
                 markerfacecolor="purple",
-                label="SDD Trajectory",
+                label="SDD",
             )
             ax.plot(
                 pda_gdfs[i].geometry.x,
@@ -397,7 +566,7 @@ class Privatiser:
                 marker="s",
                 markersize=5,
                 markerfacecolor="blue",
-                label="PDA Trajectory",
+                label="PDA",
             )
 
             # Plot the coastline if applicable
@@ -406,14 +575,18 @@ class Privatiser:
             )
 
             # Configure the axes labels
-            ax.set_title(f"ε={EPSILONS[i]}", y=0.9)
-            ax.set_xlabel("Lon (Mercator)")
-            ax.set_ylabel("Lat (Mercator)")
+            ax.set_title(f"ε={PRESET_EPSILONS[i]}", y=0.9)
+            ax.set_xlabel("Longitude (EPSG:3857)")
+            ax.set_ylabel("Latitude (EPSG:3857)")
             ax.set_facecolor("azure")
 
             # Annotate the start and end points of the trajectory
             ax.annotate("Start", (gdf.geometry.iloc[0].x, gdf.geometry.iloc[0].y))
             ax.annotate("End", (gdf.geometry.iloc[-1].x, gdf.geometry.iloc[-1].y))
+
+            # Format the axes to be 4 sig figs with sci notation
+            ax.xaxis.set_major_formatter(CustomScalarFormatter(useMathText=True))
+            ax.yaxis.set_major_formatter(CustomScalarFormatter(useMathText=True))
 
         for ax in axs.flat:
             ax.label_outer()
@@ -431,7 +604,7 @@ class Privatiser:
         plt.yticks(plt.yticks()[0][0::2])
         plt.ticklabel_format(useOffset=False)
         fig.tight_layout()
-        plt.subplots_adjust(wspace=0, right=0.85)
+        plt.subplots_adjust(wspace=0, hspace=0, bottom=0.1, right=0.85)
         plt.show()
 
     def command_privatise(self):
