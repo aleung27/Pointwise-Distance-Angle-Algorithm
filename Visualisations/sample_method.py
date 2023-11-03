@@ -4,6 +4,7 @@ import geopandas as gpd  # type: ignore
 
 class SampleMethod(ABC):
     COLOR = "red"  # Default colour for plotting the method
+    NAME = "default"  # Default name for the method
 
     @abstractmethod
     def _sample_angle(self, *args, **kwargs) -> float:

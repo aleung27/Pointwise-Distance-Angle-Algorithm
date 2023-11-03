@@ -1,5 +1,5 @@
 from sample_method import SampleMethod
-from constants import WEB_MERCATOR
+from common import WEB_MERCATOR
 from math import inf
 from typing import List, Tuple, Dict
 import numpy as np

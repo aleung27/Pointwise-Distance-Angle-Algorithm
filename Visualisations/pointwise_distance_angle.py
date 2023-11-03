@@ -6,7 +6,7 @@ from math import inf
 from shapely.ops import nearest_points  # type: ignore
 
 from sample_method import SampleMethod
-from constants import WEB_MERCATOR
+from common import WEB_MERCATOR
 
 
 class PointwiseDistanceAngle(SampleMethod):

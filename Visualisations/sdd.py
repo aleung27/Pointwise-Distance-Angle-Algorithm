@@ -4,7 +4,7 @@ import geopandas as gpd  # type: ignore
 from shapely.geometry import Point  # type: ignore
 
 from sample_method import SampleMethod
-from constants import WEB_MERCATOR
+from common import WEB_MERCATOR
 
 
 class SampleDistanceDirection(SampleMethod):
