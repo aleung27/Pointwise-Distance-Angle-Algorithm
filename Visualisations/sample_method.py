@@ -1,8 +1,6 @@
 from abc import ABC, abstractmethod
 import geopandas as gpd  # type: ignore
 
-WEB_MERCATOR = "EPSG:3857"  # Standard flat projection for web maps
-
 
 class SampleMethod(ABC):
     COLOR = "red"  # Default colour for plotting the method

@@ -1,11 +1,10 @@
+from typing import Dict, List
 import geopandas as gpd  # type: ignore
 from shapely.geometry import Point, LineString  # type: ignore
 import numpy as np
 from math import inf
 from shapely.ops import nearest_points  # type: ignore
-from shapely import offset_curve  # type: ignore
 
-from typing import Dict, List
 from sample_method import SampleMethod
 from constants import WEB_MERCATOR
 
@@ -115,7 +114,7 @@ class PointwiseDistanceAngle(SampleMethod):
         # Preprocess the trajectory
         gdf = self._preprocess_trajectory(gdf, delta)
 
-        # Privatised route starts and ends at the same location as the real route
+        # Store the privatised route and whether the point is valid for use in postprocessing
         privatised: Dict[str, List[Point | bool]] = {
             "geometry": [],
             "valid": [],
@@ -142,9 +141,6 @@ class PointwiseDistanceAngle(SampleMethod):
             # Sample a distance and angle from the given distributions
             sampled_distance = self._sample_distance(eps, distance)
             sampled_angle = self._sample_angle()
-            # print(
-            #     f"Distance {distance} & angle {angle} -> Distance {sampled_distance} & angle {sampled_angle}"
-            # )
 
             # Calculate the new point at angle sampled_angle in a circle of radius sampled_distance
             new_point = Point(
@@ -152,6 +148,7 @@ class PointwiseDistanceAngle(SampleMethod):
                 current_point.y + sampled_distance * np.sin(sampled_angle),
             )
             valid = self._raycast_intersection(LineString([current_point, new_point]))
+
             privatised["geometry"].append(new_point)
             privatised["valid"].append(valid)
 
@@ -160,6 +157,13 @@ class PointwiseDistanceAngle(SampleMethod):
     def postprocess_result(
         self, trajectory: gpd.GeoDataFrame, buffer: float = 0
     ) -> gpd.GeoDataFrame:
+        """
+        Postprocess the privatised result. For any point that exists within
+        an invalid area, replace it with the closest point on the boundary
+        with a buffer distance.
+        """
+
+        # Copy the trajectory so we don't modify the original
         trajectory = trajectory.copy()
 
         for i in range(len(trajectory)):

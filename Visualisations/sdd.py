@@ -1,11 +1,10 @@
-from sample_method import SampleMethod
-
 import numpy as np
 from scipy.stats import rv_continuous  # type: ignore
 import geopandas as gpd  # type: ignore
 from shapely.geometry import Point  # type: ignore
 
-WEB_MERCATOR = "EPSG:3857"  # Standard flat projection for web maps
+from sample_method import SampleMethod
+from constants import WEB_MERCATOR
 
 
 class SampleDistanceDirection(SampleMethod):
@@ -147,13 +146,11 @@ class SampleDistanceDirection(SampleMethod):
             distance = float(np.linalg.norm(v))
             angle = (np.arctan2(v[1], v[0]) + 2 * np.pi) % (2 * np.pi)
 
+            i = 0
             while True:
                 # Sample a distance and angle from the given distributions
                 sampled_distance = self._sample_distance(eps, distance, M)
                 sampled_angle = self._sample_angle(eps, angle)
-                # print(
-                #     f"Maximum allowed:{(len(gdf) - i) * M} r:{distance} M:{M} -> sampled: {sampled_distance}"
-                # )
 
                 new_point = Point(
                     last_estimate.x + sampled_distance * np.cos(sampled_angle),
@@ -163,9 +160,12 @@ class SampleDistanceDirection(SampleMethod):
                 if (
                     euclidean_distance(gdf.geometry.iloc[-1], new_point)
                     < (len(gdf) - i) * M
+                    or i > 100000000  # Break after 100 million iterations
                 ):
                     privatised["geometry"].append(new_point)
                     break
+
+                i += 1
 
         privatised["geometry"].append(gdf.geometry.iloc[-1])
         return gpd.GeoDataFrame(privatised, geometry="geometry", crs=WEB_MERCATOR)

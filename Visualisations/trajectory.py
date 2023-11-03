@@ -6,22 +6,23 @@ from typing import Dict, List
 
 import geopandas as gpd  # type: ignore
 import matplotlib.pyplot as plt  # type: ignore
-from shapely.geometry import Point  # type: ignore
-from matplotlib.ticker import StrMethodFormatter, NullFormatter, ScalarFormatter  # type: ignore
+from matplotlib.ticker import StrMethodFormatter, ScalarFormatter  # type: ignore
 
 from sample_method import SampleMethod
 from pointwise_distance_angle import PointwiseDistanceAngle
 from sdd import SampleDistanceDirection
 
-from dtw import dtw, DTW  # type: ignore
+from dtw import dtw  # type: ignore
 from similaritymeasures import frechet_dist  # type: ignore
 from math import inf
 
 from constants import WEB_MERCATOR, WGS_84
 
+# Constants pointing to the dataset and coastline shapefile
 DATASET_PATH = os.path.join(Path(__file__).parent.parent, "AIS_2019_01_01.csv")
 FLORIDA_COASTLINE = "Shapefiles/florida_coastline.shp"
 
+# Drop these columns from the dataset as they are not needed
 EXCESS_COLUMNS = [
     "SOG",
     "COG",
@@ -48,6 +49,7 @@ MODES = {
     "ed": "Error Comparison, varying delta",
 }
 
+# Preset variables for use in experimentation
 PRESET_MMSIS = [
     258288000,
     316038559,
@@ -60,6 +62,10 @@ TEST_ITERATIONS = 100
 
 
 class CustomScalarFormatter(ScalarFormatter):
+    """
+    Custom scalar formatter to format the axes to be 4 sig figs with sci notation
+    """
+
     def _set_format(self):
         self.format = "%#.4g"
 
@@ -73,6 +79,12 @@ class Privatiser:
         self.florida_coastline = self.load_florida_coastline()
 
     def load_initial_data(self) -> gpd.GeoDataFrame:
+        """
+        Load the dataset into python and clean it by removing excess columns and
+        reprojecting to web mercator
+        """
+
+        # Load the dataset and drop the excess columns
         df = pd.read_csv(DATASET_PATH)
         df.drop(
             labels=EXCESS_COLUMNS,
@@ -90,11 +102,19 @@ class Privatiser:
         return gdf.to_crs(WEB_MERCATOR)
 
     def load_florida_coastline(self) -> gpd.GeoDataFrame:
+        """
+        Load the florida coastline shapefile and reproject to web mercator
+        """
+
         florida_coastline = gpd.read_file(FLORIDA_COASTLINE)
 
         return florida_coastline.to_crs(WEB_MERCATOR)
 
     def run_command(self):
+        """
+        Determine which command to run to select an experiment to run
+        """
+
         commands = "\n".join([f"\t- {v} ({k})" for k, v in MODES.items()])
         mode = input(f"Enter a command:\n {commands}\n")
 
